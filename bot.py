@@ -419,15 +419,27 @@ class LiveTrader:
     _log_file = os.path.join(_BOT_DIR, "live_trades_log.csv")
 
     def __init__(self):
-        self._is_bybit = config.FUTURES_EXCHANGE == "bybit"
-        api_key    = config.BYBIT_API_KEY    if self._is_bybit else config.BINANCE_API_KEY
-        api_secret = config.BYBIT_API_SECRET if self._is_bybit else config.BINANCE_API_SECRET
-        exchange_class = getattr(ccxt, config.FUTURES_EXCHANGE)
-        self._exchange = exchange_class({
+        exch = config.FUTURES_EXCHANGE
+        self._is_bybit = exch == "bybit"
+        self._is_okx   = exch == "okx"
+
+        if self._is_okx:
+            api_key, api_secret = config.OKX_API_KEY, config.OKX_API_SECRET
+        elif self._is_bybit:
+            api_key, api_secret = config.BYBIT_API_KEY, config.BYBIT_API_SECRET
+        else:
+            api_key, api_secret = config.BINANCE_API_KEY, config.BINANCE_API_SECRET
+
+        exchange_params = {
             "apiKey":  api_key,
             "secret":  api_secret,
-            "options": {"defaultType": "future"},
-        })
+            "options": {"defaultType": "swap" if self._is_okx else "future"},
+        }
+        if self._is_okx:
+            exchange_params["password"] = config.OKX_PASSPHRASE
+
+        exchange_class = getattr(ccxt, exch)
+        self._exchange = exchange_class(exchange_params)
         self._exchange.has["fetchCurrencies"] = False  # skip geo-blocked private endpoint
         self._exchange.load_markets()
 
@@ -442,8 +454,12 @@ class LiveTrader:
 
     def _set_leverage(self, fsym: str, lev: int):
         try:
-            # Bybit requires explicit buy/sell leverage params
-            params = {"buyLeverage": str(lev), "sellLeverage": str(lev)} if self._is_bybit else {}
+            if self._is_bybit:
+                params = {"buyLeverage": str(lev), "sellLeverage": str(lev)}
+            elif self._is_okx:
+                params = {"mgnMode": "isolated"}
+            else:
+                params = {}
             self._exchange.set_leverage(lev, fsym, params=params)
         except Exception as e:
             print(f"[live] set_leverage {fsym} {lev}x: {e}")
@@ -451,11 +467,15 @@ class LiveTrader:
     def _sl_params(self, trigger: float) -> dict:
         if self._is_bybit:
             return {"triggerPrice": trigger, "reduceOnly": True}
+        if self._is_okx:
+            return {"stopPrice": trigger, "reduceOnly": True}
         return {"stopPrice": trigger, "closePosition": True, "reduceOnly": True}
 
     def _tp_params(self, trigger: float) -> dict:
         if self._is_bybit:
             return {"triggerPrice": trigger, "reduceOnly": True}
+        if self._is_okx:
+            return {"stopPrice": trigger, "reduceOnly": True}
         return {"stopPrice": trigger, "closePosition": True, "reduceOnly": True}
 
     def _cancel_open_orders(self, fsym: str):

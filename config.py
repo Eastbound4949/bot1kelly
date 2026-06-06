@@ -12,6 +12,9 @@ BINANCE_API_KEY    = os.environ.get("BINANCE_API_KEY",    "")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
 BYBIT_API_KEY      = os.environ.get("BYBIT_API_KEY",      "")
 BYBIT_API_SECRET   = os.environ.get("BYBIT_API_SECRET",   "")
+OKX_API_KEY        = os.environ.get("OKX_API_KEY",        "")
+OKX_API_SECRET     = os.environ.get("OKX_API_SECRET",     "")
+OKX_PASSPHRASE     = os.environ.get("OKX_PASSPHRASE",     "")
 
 # ─── Telegram ──────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "")
@@ -60,12 +63,12 @@ MODEL_FILE     = "model.pkl"  # Used when SYMBOLS has a single entry
 RETRAIN_DAYS   = 7            # Retrain every N days
 
 # ─── Live trading ──────────────────────────────────────────────
-# Set LIVE_TRADING=true env var to enable real order execution on Binance USDT-M Futures.
-# Requires a non-US server (Binance is geo-blocked on US IPs — use EU/Singapore VPS).
+# Set LIVE_TRADING=true + FUTURES_EXCHANGE=okx + OKX_API_KEY/SECRET/PASSPHRASE env vars.
+# OKX has no geo-block on Railway. Binance(451) + Bybit(CloudFront 403) both block Railway.
 LIVE_TRADING          = os.environ.get("LIVE_TRADING",          "false").lower() == "true"
 MAX_CONCURRENT_TRADES = int(os.environ.get("MAX_CONCURRENT_TRADES", "2"))
 LEVERAGE              = int(os.environ.get("LEVERAGE",              "3"))
-FUTURES_EXCHANGE      = os.environ.get("FUTURES_EXCHANGE",      "bybit")
+FUTURES_EXCHANGE      = os.environ.get("FUTURES_EXCHANGE",      "okx")
 
 # ─── Reverse Kelly / risk-tapering bands ──────────────────────
 # Band 1 $100–$200:  20% risk, aggressive — die cheap if it fails
