@@ -419,14 +419,17 @@ class LiveTrader:
     _log_file = os.path.join(_BOT_DIR, "live_trades_log.csv")
 
     def __init__(self):
+        self._is_bybit = config.FUTURES_EXCHANGE == "bybit"
+        api_key    = config.BYBIT_API_KEY    if self._is_bybit else config.BINANCE_API_KEY
+        api_secret = config.BYBIT_API_SECRET if self._is_bybit else config.BINANCE_API_SECRET
         exchange_class = getattr(ccxt, config.FUTURES_EXCHANGE)
         self._exchange = exchange_class({
-            "apiKey":  config.BINANCE_API_KEY,
-            "secret":  config.BINANCE_API_SECRET,
+            "apiKey":  api_key,
+            "secret":  api_secret,
             "options": {"defaultType": "future"},
         })
+        self._exchange.options["fetchCurrencies"] = False  # skip geo-blocked private endpoint
         self._exchange.load_markets()
-        self._is_bybit = config.FUTURES_EXCHANGE == "bybit"
 
     # ── Exchange helpers ──────────────────────────────────────────────────────
 

@@ -7,9 +7,11 @@ import os
 # ─── Exchange ──────────────────────────────────────────────────
 EXCHANGE = os.environ.get("EXCHANGE", "kucoin")   # kucoin works on Railway US servers
 
-# ─── Binance API ───────────────────────────────────────────────
+# ─── Exchange API keys ─────────────────────────────────────────
 BINANCE_API_KEY    = os.environ.get("BINANCE_API_KEY",    "")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
+BYBIT_API_KEY      = os.environ.get("BYBIT_API_KEY",      "")
+BYBIT_API_SECRET   = os.environ.get("BYBIT_API_SECRET",   "")
 
 # ─── Telegram ──────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "")
