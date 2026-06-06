@@ -931,7 +931,8 @@ if __name__ == "__main__":
     if config.LIVE_TRADING:
         print(f" Exchange: {config.FUTURES_EXCHANGE} | Leverage: dynamic (max before liquidation, cap 40x)")
         print(f" Max concurrent trades: {config.MAX_CONCURRENT_TRADES}")
-        print(f" Kelly bands: {[f'${b[\"min\"]}-{b[\"max\"]} {b[\"risk_pct\"]:.0%}' for b in config.KELLY_BANDS]}")
+        _bands = ", ".join(f"${b['min']}-{b['max']} {b['risk_pct']:.0%}" for b in config.KELLY_BANDS)
+        print(f" Kelly bands: [{_bands}]")
     else:
         print(f" Balance:  ${config.PAPER_STARTING_BALANCE:,.0f} (paper)")
     print(f" BUY threshold: {config.BUY_THRESHOLD:.0%} | Risk/trade: {config.RISK_PER_TRADE:.0%}")
