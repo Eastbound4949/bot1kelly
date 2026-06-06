@@ -419,12 +419,14 @@ class LiveTrader:
     _log_file = os.path.join(_BOT_DIR, "live_trades_log.csv")
 
     def __init__(self):
-        self._exchange = ccxt.binanceusdm({
+        exchange_class = getattr(ccxt, config.FUTURES_EXCHANGE)
+        self._exchange = exchange_class({
             "apiKey":  config.BINANCE_API_KEY,
             "secret":  config.BINANCE_API_SECRET,
             "options": {"defaultType": "future"},
         })
         self._exchange.load_markets()
+        self._is_bybit = config.FUTURES_EXCHANGE == "bybit"
 
     # ── Exchange helpers ──────────────────────────────────────────────────────
 
@@ -437,9 +439,21 @@ class LiveTrader:
 
     def _set_leverage(self, fsym: str, lev: int):
         try:
-            self._exchange.set_leverage(lev, fsym)
+            # Bybit requires explicit buy/sell leverage params
+            params = {"buyLeverage": str(lev), "sellLeverage": str(lev)} if self._is_bybit else {}
+            self._exchange.set_leverage(lev, fsym, params=params)
         except Exception as e:
             print(f"[live] set_leverage {fsym} {lev}x: {e}")
+
+    def _sl_params(self, trigger: float) -> dict:
+        if self._is_bybit:
+            return {"triggerPrice": trigger, "reduceOnly": True}
+        return {"stopPrice": trigger, "closePosition": True, "reduceOnly": True}
+
+    def _tp_params(self, trigger: float) -> dict:
+        if self._is_bybit:
+            return {"triggerPrice": trigger, "reduceOnly": True}
+        return {"stopPrice": trigger, "closePosition": True, "reduceOnly": True}
 
     def _cancel_open_orders(self, fsym: str):
         try:
@@ -531,16 +545,14 @@ class LiveTrader:
         tp_str = float(self._exchange.price_to_precision(fsym, tp_price))
 
         try:
-            self._exchange.create_order(fsym, "stop_market", close_side, units, params={
-                "stopPrice": sl_str, "closePosition": True, "reduceOnly": True,
-            })
+            self._exchange.create_order(fsym, "stop_market", close_side, units,
+                                        params=self._sl_params(sl_str))
         except Exception as e:
             print(f"[live] SL order failed: {e}")
 
         try:
-            self._exchange.create_order(fsym, "take_profit_market", close_side, units, params={
-                "stopPrice": tp_str, "closePosition": True, "reduceOnly": True,
-            })
+            self._exchange.create_order(fsym, "take_profit_market", close_side, units,
+                                        params=self._tp_params(tp_str))
         except Exception as e:
             print(f"[live] TP order failed: {e}")
 

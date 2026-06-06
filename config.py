@@ -63,7 +63,7 @@ RETRAIN_DAYS   = 7            # Retrain every N days
 LIVE_TRADING          = os.environ.get("LIVE_TRADING",          "false").lower() == "true"
 MAX_CONCURRENT_TRADES = int(os.environ.get("MAX_CONCURRENT_TRADES", "2"))
 LEVERAGE              = int(os.environ.get("LEVERAGE",              "3"))
-FUTURES_EXCHANGE      = os.environ.get("FUTURES_EXCHANGE",      "binanceusdm")
+FUTURES_EXCHANGE      = os.environ.get("FUTURES_EXCHANGE",      "bybit")
 
 # ─── Reverse Kelly / risk-tapering bands ──────────────────────
 # Band 1 $100–$200:  20% risk, aggressive — die cheap if it fails
