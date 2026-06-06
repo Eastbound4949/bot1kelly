@@ -1,0 +1,6 @@
+# Force LF for files that run on Linux servers
+*.sh text eol=lf
+*.toml text eol=lf
+*.py text eol=lf
+Procfile text eol=lf
+runtime.txt text eol=lf

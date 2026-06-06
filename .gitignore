@@ -1,0 +1,35 @@
+# Model and runtime files
+model.pkl
+model_*.pkl
+trades_log.csv
+promoted_to_live.flag
+ruvector.db
+ss/
+
+# Scratch / temp
+raw.zip
+raw_extracted/
+requirements_and_guide.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+dist/
+build/
+
+# Secrets — never commit real keys
+.env
+*.env
+# config.py is tracked (all values read from env vars; defaults are empty strings)
+
+# Runtime logs
+live_trades_log.csv
+trades_log.csv
+
+# OS
+.DS_Store
+Thumbs.db
