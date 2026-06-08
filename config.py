@@ -63,12 +63,13 @@ MODEL_FILE     = "model.pkl"  # Used when SYMBOLS has a single entry
 RETRAIN_DAYS   = 7            # Retrain every N days
 
 # ─── Live trading ──────────────────────────────────────────────
-# Set LIVE_TRADING=true + FUTURES_EXCHANGE=okx + OKX_API_KEY/SECRET/PASSPHRASE env vars.
-# OKX has no geo-block on Railway. Binance(451) + Bybit(CloudFront 403) both block Railway.
+# Set LIVE_TRADING=true + FUTURES_EXCHANGE=binanceusdm + BINANCE_API_KEY/SECRET env vars.
+# Binance/Bybit are IP-blocked (451/403) on Railway — this bot runs from a home PC/VPS
+# with a non-datacenter IP instead. OKX was tried but is account/KYC-blocked for this user.
 LIVE_TRADING          = os.environ.get("LIVE_TRADING",          "false").lower() == "true"
 MAX_CONCURRENT_TRADES = int(os.environ.get("MAX_CONCURRENT_TRADES", "2"))
 LEVERAGE              = int(os.environ.get("LEVERAGE",              "3"))
-FUTURES_EXCHANGE      = os.environ.get("FUTURES_EXCHANGE",      "okx")
+FUTURES_EXCHANGE      = os.environ.get("FUTURES_EXCHANGE",      "binanceusdm")
 
 # ─── Reverse Kelly / risk-tapering bands ──────────────────────
 # Band 1 $100–$200:  20% risk, aggressive — die cheap if it fails

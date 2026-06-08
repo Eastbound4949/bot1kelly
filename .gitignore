@@ -24,6 +24,8 @@ build/
 # Secrets — never commit real keys
 .env
 *.env
+run_live.ps1
+run_live*.ps1
 # config.py is tracked (all values read from env vars; defaults are empty strings)
 
 # Runtime logs
