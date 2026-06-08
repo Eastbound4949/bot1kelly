@@ -266,9 +266,12 @@ class PaperTrader:
 
         # ── Short position exit ───────────────────────────────────────────────
         if self.short_position > 0 and self.short_symbol == symbol:
-            # Trailing stop for shorts moves DOWN as price falls, never up
+            # Trailing stop for shorts moves DOWN as price falls, never up.
+            # Gate: only tighten to breakeven-or-better — otherwise it parks
+            # between entry and the original stop, and a normal retrace closes
+            # the trade at a small loss before TP is ever reached.
             new_trail = price + config.TRAIL_STOP_ATR_MULT * atr
-            if new_trail < self.short_trail_stop:
+            if new_trail < self.short_trail_stop and new_trail <= self.short_entry_price:
                 self.short_trail_stop = new_trail
 
             hard_stop      = self.short_entry_price * (1 + config.STOP_LOSS_PCT)
@@ -285,9 +288,12 @@ class PaperTrader:
 
         # ── Long position exit ────────────────────────────────────────────────
         if self.position > 0 and self.position_symbol == symbol:
-            # Update trailing stop: only moves up, never down
+            # Update trailing stop: only moves up, never down.
+            # Gate: only tighten to breakeven-or-better — same reasoning as the
+            # short side above: a stop parked between entry and the original
+            # floor turns a near-TP retrace into a needless loss.
             new_trail = price - config.TRAIL_STOP_ATR_MULT * atr
-            if new_trail > self.trail_stop_price:
+            if new_trail > self.trail_stop_price and new_trail >= self.entry_price:
                 self.trail_stop_price = new_trail
 
             hard_stop      = self.entry_price * (1 - config.STOP_LOSS_PCT)
