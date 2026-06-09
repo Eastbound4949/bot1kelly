@@ -53,10 +53,11 @@ TRADE_SIZE_PCT         = 0.95     # Kept for backward compat (not used in v3)
 LOG_FILE               = "trades_log.csv"
 
 # ─── Regime filter ─────────────────────────────────────────────
-TREND_FILTER        = True    # Require price > EMA200
-ADX_TREND_THRESHOLD = 20      # Min ADX to consider market trending
-EMA_ALIGN_THRESHOLD = 2       # Min EMA alignment score (0–3) to allow BUY
-REQUIRE_HTF_TREND   = False   # Disabled — was blocking all entries in sideways market
+TREND_FILTER            = True    # Require price > EMA200
+ADX_TREND_THRESHOLD     = 20      # Min ADX to consider market trending
+EMA_ALIGN_THRESHOLD     = 1       # Min EMA alignment score (0–3) to allow BUY (relaxed from 2)
+REQUIRE_HTF_TREND       = False   # Disabled — was blocking all entries in sideways market
+REGIME_BYPASS_THRESHOLD = float(os.environ.get("REGIME_BYPASS_THRESHOLD", "0.75"))  # skip regime if ML prob >= this
 
 # ─── Model ─────────────────────────────────────────────────────
 MODEL_FILE     = "model.pkl"  # Used when SYMBOLS has a single entry
