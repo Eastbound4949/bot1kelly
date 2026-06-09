@@ -100,17 +100,22 @@ def load_short_model(symbol: str) -> tuple | None:
 
 # ─── Regime filter ────────────────────────────────────────────────────────────
 
-def _regime_ok(df: pd.DataFrame) -> bool:
+def _regime_ok(df: pd.DataFrame, prob: float = 0.0) -> bool:
     """Return True only when market conditions justify a long entry."""
+    # High-confidence override: skip regime check if ML prob >= 75%
+    if prob >= config.REGIME_BYPASS_THRESHOLD:
+        return True
+
     row = df.iloc[-1]
 
     def get(col, default):
         return row[col] if col in df.columns else default
 
-    above_ema200    = bool(get("above_ema200", 1))
-    adx_trending    = bool(get("regime_trending", 0)) or get("ema_alignment", 0) >= config.EMA_ALIGN_THRESHOLD
-    no_extreme_vol  = not bool(get("regime_high_vol", 0))
-    htf_trend       = not config.REQUIRE_HTF_TREND or bool(get("htf_trend_up", 1))
+    above_ema200   = bool(get("above_ema200", 1))
+    # Relaxed: ema_alignment >= 1 (was 2) — catches trending pairs with mixed EMAs
+    adx_trending   = bool(get("regime_trending", 0)) or get("ema_alignment", 0) >= 1
+    no_extreme_vol = not bool(get("regime_high_vol", 0))
+    htf_trend      = not config.REQUIRE_HTF_TREND or bool(get("htf_trend_up", 1))
 
     return (
         (not config.TREND_FILTER or above_ema200) and
@@ -120,21 +125,24 @@ def _regime_ok(df: pd.DataFrame) -> bool:
     )
 
 
-def _bearish_regime_ok(df: pd.DataFrame) -> bool:
+def _bearish_regime_ok(df: pd.DataFrame, prob: float = 0.0) -> bool:
     """Return True only when market conditions justify a short entry."""
+    # High-confidence override: skip regime check if ML prob >= 75%
+    if prob >= config.REGIME_BYPASS_THRESHOLD:
+        return True
+
     row = df.iloc[-1]
 
     def get(col, default):
         return row[col] if col in df.columns else default
 
-    below_ema200   = not bool(get("above_ema200", 1))
-    ema_bearish    = int(get("ema_alignment", 3)) <= 1  # at most 1 of 3 EMAs bullish
-    adx_trending   = bool(get("regime_trending", 0))    # need confirmed trend (down or up, ADX>25)
+    # Removed below_ema200 requirement — kills all shorts in bull markets
+    ema_bearish    = int(get("ema_alignment", 3)) <= 2  # relaxed: 2 of 3 EMAs bearish (was 1)
+    adx_trending   = bool(get("regime_trending", 0))
     no_extreme_vol = not bool(get("regime_high_vol", 0))
     htf_trend_down = not bool(get("htf_trend_up", 1))
 
     return (
-        (not config.TREND_FILTER or below_ema200) and
         ema_bearish and
         adx_trending and
         no_extreme_vol and
@@ -776,12 +784,12 @@ def _run_live_bot():
         action_price, action_atr = best_price, best_atr
         exec_prob  = best_prob
 
-        if best_prob >= config.BUY_THRESHOLD and _regime_ok(best_df) and best_sym not in open_syms:
+        if best_prob >= config.BUY_THRESHOLD and _regime_ok(best_df, best_prob) and best_sym not in open_syms:
             signal = "BUY"
         elif (
             config.ENABLE_SHORTING
             and sh_prob >= config.SHORT_THRESHOLD
-            and _bearish_regime_ok(sh_df)
+            and _bearish_regime_ok(sh_df, sh_prob)
             and sh_sym not in open_syms
         ):
             signal = "SHORT"
@@ -903,13 +911,13 @@ def run_bot():
         best_short = max(candidates, key=lambda x: x[2])
         sh_sym, _, sh_prob, sh_price, sh_atr, sh_df = best_short
 
-        trend_tag  = "↑" if _regime_ok(best_df) else "↓regime"
+        trend_tag  = "↑" if _regime_ok(best_df, best_prob) else "↓regime"
         print(f"[bot] Best BUY:   {best_sym} prob={best_prob:.1%} ${best_price:,.4f} {trend_tag}")
         for sym, prob, s_prob, price, _, _ in candidates[1:]:
             s_tag = f" | short={s_prob:.1%}" if config.ENABLE_SHORTING else ""
             print(f"      {sym} buy={prob:.1%} ${price:,.4f}{s_tag}")
         if config.ENABLE_SHORTING:
-            sh_tag = "↓" if _bearish_regime_ok(sh_df) else "↑regime"
+            sh_tag = "↓" if _bearish_regime_ok(sh_df, sh_prob) else "↑regime"
             print(f"[bot] Best SHORT: {sh_sym} prob={sh_prob:.1%} ${sh_price:,.4f} {sh_tag}")
 
         signal     = "HOLD"
@@ -917,9 +925,9 @@ def run_bot():
         action_price, action_atr = best_price, best_atr
         exec_prob  = best_prob
 
-        if best_prob >= config.BUY_THRESHOLD and _regime_ok(best_df):
+        if best_prob >= config.BUY_THRESHOLD and _regime_ok(best_df, best_prob):
             signal = "BUY"
-        elif config.ENABLE_SHORTING and sh_prob >= config.SHORT_THRESHOLD and _bearish_regime_ok(sh_df):
+        elif config.ENABLE_SHORTING and sh_prob >= config.SHORT_THRESHOLD and _bearish_regime_ok(sh_df, sh_prob):
             signal = "SHORT"
             action_sym, action_price, action_atr = sh_sym, sh_price, sh_atr
             exec_prob = sh_prob
