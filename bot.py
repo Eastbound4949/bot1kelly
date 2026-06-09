@@ -13,6 +13,7 @@ Upgrades over v2:
 import csv
 import os
 import pickle
+import time
 from datetime import datetime
 
 _BOT_DIR = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
@@ -455,7 +456,15 @@ class LiveTrader:
         exchange_class = getattr(ccxt, exch)
         self._exchange = exchange_class(exchange_params)
         self._exchange.has["fetchCurrencies"] = False  # skip geo-blocked private endpoint
-        self._exchange.load_markets()
+        _delay = 30
+        for _attempt in range(1, 9999):
+            try:
+                self._exchange.load_markets()
+                break
+            except Exception as e:
+                print(f"[live] load_markets attempt {_attempt} failed: {e}. Retry in {_delay}s...")
+                time.sleep(_delay)
+                _delay = min(int(_delay * 1.5), 300)
 
     # ── Exchange helpers ──────────────────────────────────────────────────────
 
