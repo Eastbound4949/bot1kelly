@@ -476,6 +476,13 @@ class LiveTrader:
         return [p for p in self._exchange.fetch_positions() if float(p.get("contracts", 0)) != 0]
 
     def _set_leverage(self, fsym: str, lev: int):
+        if not self._is_bybit and not self._is_okx:
+            # Binance defaults new symbols to ISOLATED, which gets margin-called
+            # on adverse moves; CROSSED shares the whole account balance as margin.
+            try:
+                self._exchange.set_margin_mode("cross", fsym)
+            except Exception as e:
+                print(f"[live] set_margin_mode {fsym} cross: {e}")
         try:
             if self._is_bybit:
                 params = {"buyLeverage": str(lev), "sellLeverage": str(lev)}
@@ -492,14 +499,16 @@ class LiveTrader:
             return {"triggerPrice": trigger, "reduceOnly": True}
         if self._is_okx:
             return {"stopPrice": trigger, "reduceOnly": True}
-        return {"stopPrice": trigger, "closePosition": True, "reduceOnly": True}
+        # Binance USDM rejects reduceOnly combined with closePosition (-1106)
+        return {"stopPrice": trigger, "closePosition": True}
 
     def _tp_params(self, trigger: float) -> dict:
         if self._is_bybit:
             return {"triggerPrice": trigger, "reduceOnly": True}
         if self._is_okx:
             return {"stopPrice": trigger, "reduceOnly": True}
-        return {"stopPrice": trigger, "closePosition": True, "reduceOnly": True}
+        # Binance USDM rejects reduceOnly combined with closePosition (-1106)
+        return {"stopPrice": trigger, "closePosition": True}
 
     def _cancel_open_orders(self, fsym: str):
         try:
