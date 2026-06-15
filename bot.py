@@ -551,8 +551,7 @@ class LiveTrader:
             return "HOLD — no open position (SL/TP may have closed it)"
 
         # ── New entry ─────────────────────────────────────────────────────────
-        all_open = self._open_positions()
-        if len(all_open) >= config.MAX_CONCURRENT_TRADES:
+        if len(open_pos_map) >= config.MAX_CONCURRENT_TRADES:
             return f"HOLD — max {config.MAX_CONCURRENT_TRADES} concurrent trades open"
 
         balance = self._free_balance()
@@ -619,6 +618,42 @@ class LiveTrader:
         )
         self._log(symbol, signal, entry_price, result)
         return result
+
+    def run_heartbeat_trade(self) -> str:
+        """Open + immediately close the smallest possible position on SYMBOL.
+        Run once per startup/redeploy to prove the exchange connection,
+        order execution, and Telegram relay are all working end-to-end."""
+        fsym = _futures_symbol(config.SYMBOL)
+        try:
+            market   = self._exchange.markets[fsym]
+            min_amt  = market.get("limits", {}).get("amount", {}).get("min") or 0
+            min_cost = market.get("limits", {}).get("cost", {}).get("min") or 0
+
+            ticker = self._exchange.fetch_ticker(fsym)
+            price  = float(ticker["last"])
+
+            units = max(min_amt, (min_cost / price) if price else 0)
+            units = float(self._exchange.amount_to_precision(fsym, units * 1.05))  # small buffer over exchange minimum
+            if units <= 0:
+                raise ValueError("could not determine minimum order size")
+
+            self._set_leverage(fsym, 1)
+            open_order  = self._exchange.create_order(fsym, "market", "buy", units)
+            entry_price = float(open_order.get("average") or open_order.get("price") or price)
+
+            close_order = self._exchange.create_order(fsym, "market", "sell", units, params={"reduceOnly": True})
+            exit_price  = float(close_order.get("average") or close_order.get("price") or price)
+
+            msg = (
+                f"HEARTBEAT OK — {config.SYMBOL} open+close {units} @ ~${entry_price:,.2f} "
+                f"-> ~${exit_price:,.2f} (fees only, position flat)"
+            )
+        except Exception as e:
+            msg = f"HEARTBEAT FAILED — {config.SYMBOL}: {e}"
+
+        print(f"[live] {msg}")
+        send_telegram(f"*Startup Heartbeat*\n{msg}")
+        return msg
 
     def portfolio_value(self, _price: float = 0.0) -> float:
         try:
@@ -761,6 +796,8 @@ def _run_live_bot():
                     f"[live] {sym} {side} ${price:,.4f} | ML: {prob:.1%} | "
                     f"uPnL: ${upnl:+,.2f} | {signal} → {action}"
                 )
+                if action.startswith("ML-CLOSE"):
+                    send_telegram(f"*Trade Closed*\n{sym} {signal} @ ${price:,.4f}\n{action}")
                 paper_trader.log_trade(now, sym, signal, price, prob, action)
 
             except Exception as e:
@@ -777,8 +814,8 @@ def _run_live_bot():
         )
 
         if n_open >= config.MAX_CONCURRENT_TRADES:
-            print(f"[live] Max trades ({config.MAX_CONCURRENT_TRADES}) reached — skip scan")
-            send_telegram(msg_header)
+            print(f"[live] Max concurrent trades reached ({n_open}/{config.MAX_CONCURRENT_TRADES}) — skipping scan")
+            send_telegram(f"{msg_header}\nHOLD — max {config.MAX_CONCURRENT_TRADES} concurrent trades open")
             return
 
         utc_hour = datetime.utcnow().hour
@@ -994,6 +1031,9 @@ if __name__ == "__main__":
     if config.ENABLE_SHORTING:
         print(f" SHORT threshold: {config.SHORT_THRESHOLD:.0%} | Shorting: ENABLED")
     print("=" * 55)
+
+    if config.LIVE_TRADING and isinstance(paper_trader, LiveTrader):
+        paper_trader.run_heartbeat_trade()
 
     run_bot()
 

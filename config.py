@@ -68,8 +68,8 @@ RETRAIN_DAYS   = 7            # Retrain every N days
 # Binance/Bybit are IP-blocked (451/403) on Railway — this bot runs from a home PC/VPS
 # with a non-datacenter IP instead. OKX was tried but is account/KYC-blocked for this user.
 LIVE_TRADING          = os.environ.get("LIVE_TRADING",          "false").lower() == "true"
-MAX_CONCURRENT_TRADES = int(os.environ.get("MAX_CONCURRENT_TRADES", "2"))
 LEVERAGE              = int(os.environ.get("LEVERAGE",              "3"))
+MAX_CONCURRENT_TRADES = int(os.environ.get("MAX_CONCURRENT_TRADES", "2"))
 FUTURES_EXCHANGE      = os.environ.get("FUTURES_EXCHANGE",      "binanceusdm")
 
 # ─── Reverse Kelly / risk-tapering bands ──────────────────────
