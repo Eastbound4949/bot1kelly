@@ -11,6 +11,7 @@ Upgrades over v2:
 """
 
 import csv
+import json
 import os
 import pickle
 import time
@@ -456,6 +457,8 @@ class LiveTrader:
         exchange_class = getattr(ccxt, exch)
         self._exchange = exchange_class(exchange_params)
         self._exchange.has["fetchCurrencies"] = False  # skip geo-blocked private endpoint
+        self._state_file = os.path.join(_BOT_DIR, "live_trail_state.json")
+        self._live_state: dict = self._load_live_state()
         _delay = 30
         for _attempt in range(1, 9999):
             try:
@@ -515,6 +518,72 @@ class LiveTrader:
             self._exchange.cancel_all_orders(fsym)
         except Exception as e:
             print(f"[live] cancel_all_orders {fsym}: {e}")
+
+    # ── Trail state persistence ───────────────────────────────────────────────
+
+    def _load_live_state(self) -> dict:
+        if os.path.exists(self._state_file):
+            try:
+                with open(self._state_file) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_live_state(self, symbol: str, state: dict):
+        self._live_state[symbol] = state
+        with open(self._state_file, "w") as f:
+            json.dump(self._live_state, f)
+
+    def _clear_live_state(self, symbol: str):
+        self._live_state.pop(symbol, None)
+        with open(self._state_file, "w") as f:
+            json.dump(self._live_state, f)
+
+    def _update_trail_stop(self, symbol: str, price: float, atr: float) -> str | None:
+        """Advance ATR trailing stop once price reaches breakeven-or-better.
+        Cancel old SL, place new one. Re-place TP so it isn't lost."""
+        state = self._live_state.get(symbol)
+        if not state:
+            return None
+
+        fsym         = _futures_symbol(symbol)
+        side         = state["side"]
+        entry_price  = state["entry_price"]
+        current_trail = state["trail_stop"]
+        tp_price     = state["tp_price"]
+        units        = state["units"]
+        atr          = max(atr, price * 0.001)
+
+        if side == "long":
+            new_trail = price - config.TRAIL_STOP_ATR_MULT * atr
+            if not (new_trail > current_trail and new_trail >= entry_price):
+                return None
+            close_side = "sell"
+        else:
+            new_trail = price + config.TRAIL_STOP_ATR_MULT * atr
+            if not (new_trail < current_trail and new_trail <= entry_price):
+                return None
+            close_side = "buy"
+
+        sl_prec = float(self._exchange.price_to_precision(fsym, new_trail))
+        tp_prec = float(self._exchange.price_to_precision(fsym, tp_price))
+
+        self._cancel_open_orders(fsym)
+        try:
+            self._exchange.create_order(fsym, "stop_market", close_side, units,
+                                        params=self._sl_params(sl_prec))
+        except Exception as e:
+            print(f"[live] trail SL order failed: {e}")
+        try:
+            self._exchange.create_order(fsym, "take_profit_market", close_side, units,
+                                        params=self._tp_params(tp_prec))
+        except Exception as e:
+            print(f"[live] trail TP re-place failed: {e}")
+
+        state["trail_stop"] = sl_prec
+        self._save_live_state(symbol, state)
+        return f"TRAIL → SL ${sl_prec:,.2f} (was ${current_trail:,.2f})"
 
     # ── Main execute ──────────────────────────────────────────────────────────
 
@@ -616,6 +685,14 @@ class LiveTrader:
             f"Lev: {dynamic_lev}x | Band {kelly['band']} ({kelly['label']}) | "
             f"Risk: {kelly['risk_pct']:.1%} = ${risk_amount:.2f}"
         )
+        self._save_live_state(symbol, {
+            "side":        "long" if signal == "BUY" else "short",
+            "entry_price": entry_price,
+            "entry_atr":   atr,
+            "trail_stop":  float(sl_str),
+            "tp_price":    float(tp_str),
+            "units":       units,
+        })
         self._log(symbol, signal, entry_price, result)
         return result
 
@@ -754,6 +831,12 @@ def _run_live_bot():
             f"Band {kelly['band']} ({kelly['label']}) | Open positions: {len(open_positions)}"
         )
 
+        # Clean up state for positions closed by exchange SL/TP
+        open_syms = {p["symbol"].split("/")[0] + "USDT" for p in open_positions}
+        for sym in list(paper_trader._live_state.keys()):
+            if sym not in open_syms:
+                paper_trader._clear_live_state(sym)
+
         # Phase 1: monitor open positions for ML-driven exits
         for pos in open_positions:
             # ccxt returns 'BTC/USDT:USDT' — convert back to 'BTCUSDT'
@@ -771,6 +854,11 @@ def _run_live_bot():
                 price = float(df["close"].iloc[-1])
                 atr   = float(df["atr"].iloc[-1])
                 upnl  = float(pos.get("unrealizedPnl", 0))
+
+                trail_msg = paper_trader._update_trail_stop(sym, price, atr)
+                if trail_msg:
+                    print(f"[live] {sym} {trail_msg}")
+                    send_telegram(f"*Trail Updated*\n{sym} @ ${price:,.4f}\n{trail_msg}")
 
                 if side == "long":
                     model, fcols = load_model(sym)
@@ -797,6 +885,7 @@ def _run_live_bot():
                     f"uPnL: ${upnl:+,.2f} | {signal} → {action}"
                 )
                 if action.startswith("ML-CLOSE"):
+                    paper_trader._clear_live_state(sym)
                     send_telegram(f"*Trade Closed*\n{sym} {signal} @ ${price:,.4f}\n{action}")
                 paper_trader.log_trade(now, sym, signal, price, prob, action)
 
