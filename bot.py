@@ -632,9 +632,6 @@ class LiveTrader:
             return "HOLD — no open position (SL/TP may have closed it)"
 
         # ── New entry ─────────────────────────────────────────────────────────
-        if len(open_pos_map) >= config.MAX_CONCURRENT_TRADES:
-            return f"HOLD — max {config.MAX_CONCURRENT_TRADES} concurrent trades open"
-
         balance = self._free_balance()
         if balance < 5:
             return f"HOLD — insufficient balance ${balance:.2f}"
@@ -642,21 +639,31 @@ class LiveTrader:
         kelly = get_kelly_band(balance)
         risk_amount = balance * kelly["risk_pct"]
 
-        stop_distance = max(config.TRAIL_STOP_ATR_MULT * atr, price * config.STOP_LOSS_PCT)
-        tp_distance   = max(config.TAKE_PROFIT_ATR_MULT * atr, stop_distance * config.MIN_RR_RATIO)
+        # Fetch actual Binance price before sizing — KuCoin signal price may be stale/diverged
+        try:
+            _ticker = self._exchange.fetch_ticker(fsym)
+            live_price = float(_ticker.get("last") or _ticker.get("bid") or 0) or price
+        except Exception:
+            live_price = price
+            print(f"[live] WARNING: Binance price fetch failed for {symbol}, sizing may be off")
+
+        # Scale KuCoin ATR to Binance price level, then compute stop/tp
+        atr_live      = atr * live_price / max(price, 1e-9)
+        stop_distance = max(config.TRAIL_STOP_ATR_MULT * atr_live, live_price * config.STOP_LOSS_PCT)
+        tp_distance   = max(config.TAKE_PROFIT_ATR_MULT * atr_live, stop_distance * config.MIN_RR_RATIO)
         rr = tp_distance / stop_distance
         if rr < config.MIN_RR_RATIO:
             return f"HOLD — R:R {rr:.2f}:1 below min {config.MIN_RR_RATIO}"
 
         # Dynamic leverage: max where stop fires before liquidation (0.80 safety buffer for MMR+slippage)
-        stop_pct = stop_distance / price
+        stop_pct = stop_distance / live_price
         dynamic_lev = max(1, min(int(0.80 / stop_pct), 40))
 
         units = risk_amount / stop_distance
-        notional = units * price
+        notional = units * live_price
         max_notional = balance * config.MAX_POSITION_PCT * dynamic_lev
         if notional > max_notional:
-            units = max_notional / price
+            units = max_notional / live_price
 
         units = float(self._exchange.amount_to_precision(fsym, units))
         if units <= 0:
@@ -665,7 +672,9 @@ class LiveTrader:
         self._set_leverage(fsym, dynamic_lev)
         entry_side = "buy" if signal == "BUY" else "sell"
         order = self._exchange.create_order(fsym, "market", entry_side, units)
-        entry_price = float(order.get("average") or order.get("price") or price)
+
+        # Use Binance fill price; fall back to pre-fetched live_price (never KuCoin signal price)
+        entry_price = float(order.get("average") or order.get("price") or 0) or live_price
 
         if signal == "BUY":
             sl_price = entry_price - stop_distance
@@ -904,20 +913,16 @@ def _run_live_bot():
             except Exception as e:
                 print(f"[live] monitor {sym}: {e}")
 
-        # Phase 2: scan for new entries if slots available
+        # Phase 2: scan for new entries across all symbols (no concurrent trade limit)
         open_positions = paper_trader._open_positions()
         n_open = len(open_positions)
+        open_syms = {pos["symbol"].split("/")[0] + "USDT" for pos in open_positions}
 
         msg_header = (
             f"*Live Bot — {now}*\n"
             f"Balance: ${balance:,.2f} | Portfolio: ${portfolio_val:,.2f}\n"
             f"Band {kelly['band']} ({kelly['label']}) | Open: {n_open}"
         )
-
-        if n_open >= config.MAX_CONCURRENT_TRADES:
-            print(f"[live] Max concurrent trades reached ({n_open}/{config.MAX_CONCURRENT_TRADES}) — skipping scan")
-            send_telegram(f"{msg_header}\nHOLD — max {config.MAX_CONCURRENT_TRADES} concurrent trades open")
-            return
 
         utc_hour = datetime.utcnow().hour
         if not (5 <= utc_hour < 20):
@@ -929,37 +934,42 @@ def _run_live_bot():
             print("[live] No scan results.")
             return
 
-        best_sym, best_prob, _, best_price, best_atr, best_df = candidates[0]
-        best_short = max(candidates, key=lambda x: x[2])
-        sh_sym, _, sh_prob, sh_price, sh_atr, sh_df = best_short
+        any_signal = False
+        for sym, buy_prob, sh_prob, sym_price, sym_atr, sym_df in candidates:
+            if sym in open_syms:
+                continue
 
-        open_syms = {pos["symbol"].split("/")[0] + "USDT" for pos in open_positions}
+            signal    = "HOLD"
+            exec_prob = 0.0
+            if buy_prob >= config.BUY_THRESHOLD and _regime_ok(sym_df, buy_prob):
+                signal = "BUY"
+                exec_prob = buy_prob
+            elif (
+                config.ENABLE_SHORTING
+                and sh_prob >= config.SHORT_THRESHOLD
+                and _bearish_regime_ok(sym_df, sh_prob)
+            ):
+                signal = "SHORT"
+                exec_prob = sh_prob
 
-        signal     = "HOLD"
-        action_sym = best_sym
-        action_price, action_atr = best_price, best_atr
-        exec_prob  = best_prob
+            if signal == "HOLD":
+                continue
 
-        if best_prob >= config.BUY_THRESHOLD and _regime_ok(best_df, best_prob) and best_sym not in open_syms:
-            signal = "BUY"
-        elif (
-            config.ENABLE_SHORTING
-            and sh_prob >= config.SHORT_THRESHOLD
-            and _bearish_regime_ok(sh_df, sh_prob)
-            and sh_sym not in open_syms
-        ):
-            signal = "SHORT"
-            action_sym, action_price, action_atr = sh_sym, sh_price, sh_atr
-            exec_prob = sh_prob
+            any_signal = True
+            action = paper_trader.execute(signal, sym_price, sym_atr, sym)
+            print(f"[live] Signal: {signal} → {action}")
+            send_telegram(
+                f"{msg_header}\n"
+                f"{sym} Signal: *{signal}* ({exec_prob:.1%}) → {action}"
+            )
+            paper_trader.log_trade(now, sym, signal, sym_price, exec_prob, action)
 
-        action = paper_trader.execute(signal, action_price, action_atr, action_sym)
-        print(f"[live] Signal: {signal} → {action}")
+            if not action.startswith("HOLD"):
+                open_syms.add(sym)  # prevent double-entry same tick
 
-        send_telegram(
-            f"{msg_header}\n"
-            f"Signal: *{signal}* ({exec_prob:.1%}) → {action}"
-        )
-        paper_trader.log_trade(now, action_sym, signal, action_price, exec_prob, action)
+        if not any_signal:
+            print(f"[live] Signal: HOLD → HOLD — no qualifying signals")
+            send_telegram(f"{msg_header}\nHOLD — no qualifying signals")
 
     except Exception as e:
         err = f"[live] ERROR: {e}"
