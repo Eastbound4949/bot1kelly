@@ -707,12 +707,14 @@ class LiveTrader:
             f"Risk: {kelly['risk_pct']:.1%} = ${risk_amount:.2f}"
         )
         self._save_live_state(symbol, {
-            "side":        "long" if signal == "BUY" else "short",
-            "entry_price": entry_price,
-            "entry_atr":   atr,
-            "trail_stop":  float(sl_str),
-            "tp_price":    float(tp_str),
-            "units":       units,
+            "side":             "long" if signal == "BUY" else "short",
+            "entry_price":      entry_price,
+            "entry_atr":        atr,
+            "trail_stop":       float(sl_str),
+            "tp_price":         float(tp_str),
+            "units":            units,
+            "risk_dollar":      risk_amount,
+            "balance_at_entry": balance,
         })
         self._log(symbol, signal, entry_price, result)
         return result
