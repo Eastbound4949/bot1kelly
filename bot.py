@@ -513,11 +513,14 @@ class LiveTrader:
         # Binance USDM rejects reduceOnly combined with closePosition (-1106)
         return {"stopPrice": trigger, "closePosition": True}
 
-    def _cancel_open_orders(self, fsym: str):
+    def _cancel_open_orders(self, fsym: str) -> bool:
         try:
             self._exchange.cancel_all_orders(fsym)
+            time.sleep(0.35)  # let Binance process cancel before placing new orders
+            return True
         except Exception as e:
             print(f"[live] cancel_all_orders {fsym}: {e}")
+            return False
 
     # ── Trail state persistence ───────────────────────────────────────────────
 
@@ -569,10 +572,15 @@ class LiveTrader:
         sl_prec = float(self._exchange.price_to_precision(fsym, new_trail))
         tp_prec = float(self._exchange.price_to_precision(fsym, tp_price))
 
-        self._cancel_open_orders(fsym)
+        if not self._cancel_open_orders(fsym):
+            print(f"[live] trail skip {symbol}: cancel failed, state unchanged")
+            return None
+
+        sl_ok = False
         try:
             self._exchange.create_order(fsym, "stop_market", close_side, units,
                                         params=self._sl_params(sl_prec))
+            sl_ok = True
         except Exception as e:
             print(f"[live] trail SL order failed: {e}")
         try:
@@ -580,6 +588,10 @@ class LiveTrader:
                                         params=self._tp_params(tp_prec))
         except Exception as e:
             print(f"[live] trail TP re-place failed: {e}")
+
+        if not sl_ok:
+            print(f"[live] trail state unchanged for {symbol}: SL order failed, will retry next bar")
+            return None
 
         state["trail_stop"] = sl_prec
         self._save_live_state(symbol, state)
