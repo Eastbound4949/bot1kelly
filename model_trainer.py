@@ -91,13 +91,16 @@ def _get_exchange() -> ccxt.Exchange:
 
 
 def _to_ccxt_symbol(exchange: ccxt.Exchange, symbol: str) -> str:
-    """Convert BTCUSDT → BTC/USDT, with exchange-specific overrides."""
+    """Convert BTCUSDT → BTC/USDT (spot) or BTC/USDT:USDT (futures), with exchange-specific overrides."""
     exchange_id = exchange.id
     overrides = _EXCHANGE_SYMBOL_OVERRIDES.get(exchange_id, {})
     if symbol in overrides:
         return overrides[symbol]
     if symbol.endswith("USDT"):
-        return symbol[:-4] + "/USDT"
+        base = symbol[:-4]
+        if exchange_id in ("binanceusdm", "binancecoinm"):
+            return f"{base}/USDT:USDT"
+        return f"{base}/USDT"
     return symbol
 
 
