@@ -1160,7 +1160,7 @@ if __name__ == "__main__":
 
     print(f"\n[bot] Scheduler running every {minutes} min. Ctrl+C to stop.\n")
     send_telegram(
-        f"Bot v3 started\n"
+        f"Kelly Binance Started\n"
         f"Pairs: {', '.join(config.SYMBOLS)}\n"
         f"Interval: {config.INTERVAL} | BUY≥{config.BUY_THRESHOLD:.0%}"
     )
