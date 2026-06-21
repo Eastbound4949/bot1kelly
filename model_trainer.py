@@ -82,8 +82,10 @@ def _get_exchange() -> ccxt.Exchange:
     exchange_id = os.environ.get("EXCHANGE", "kucoin")
     exchange_class = getattr(ccxt, exchange_id)
     # OHLCV is public data — no credentials needed.
-    # Never pass Binance keys to a non-Binance exchange.
-    ex = exchange_class({"options": {"defaultType": "spot"}})
+    # binanceusdm = Binance USDT-M futures; needs defaultType=future to access futures OHLCV.
+    # All other exchanges use spot.
+    default_type = "future" if exchange_id in ("binanceusdm", "binancecoinm") else "spot"
+    ex = exchange_class({"options": {"defaultType": default_type}})
     ex.load_markets()
     return ex
 
