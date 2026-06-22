@@ -22,13 +22,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # ─── Trading settings ──────────────────────────────────────────
 SYMBOL   = "BTCUSDT"                              # Primary / fallback pair (heartbeat only)
-SYMBOLS  = [                                      # All pairs to scan each tick — matches bot1altcoins
-    "XRPUSDT", "LTCUSDT", "LINKUSDT", "ATOMUSDT", "NEARUSDT",
-    "APTUSDT", "ARBUSDT", "OPUSDT", "FILUSDT", "ICPUSDT",
-    "ETCUSDT", "XLMUSDT", "ALGOUSDT", "VETUSDT", "SANDUSDT",
-    "AAVEUSDT", "RUNEUSDT", "INJUSDT", "TIAUSDT", "SUIUSDT",
-    "SEIUSDT", "TRXUSDT", "HBARUSDT", "CRVUSDT", "LDOUSDT",
-    "DYDXUSDT", "GRTUSDT", "WLDUSDT",
+SYMBOLS  = [                                      # All pairs to scan each tick — matches bot-1-quant
+    "BTCUSDT", "ETHUSDT", "SOLUSDT",
+    "BNBUSDT", "XRPUSDT", "AVAXUSDT",
+    "DOGEUSDT", "UNIUSDT", "ADAUSDT", "DOTUSDT",
 ]
 INTERVAL = "1h"                                   # Candle size: 1m/5m/15m/1h/4h/1d
 LOOKBACK = "730 day ago UTC"
