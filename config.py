@@ -21,12 +21,15 @@ TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # ─── Trading settings ──────────────────────────────────────────
-SYMBOL   = "BTCUSDT"                              # Primary / fallback pair
-SYMBOLS  = [                                      # All pairs to scan each tick
-    "BTCUSDT", "ETHUSDT", "SOLUSDT",
-    "BNBUSDT", "AVAXUSDT",
-    "DOGEUSDT", "UNIUSDT", "ADAUSDT", "DOTUSDT",
-]  # XRPUSDT removed: net -$36 across 4 trades (trail stop whipsaw)
+SYMBOL   = "BTCUSDT"                              # Primary / fallback pair (heartbeat only)
+SYMBOLS  = [                                      # All pairs to scan each tick — matches bot1altcoins
+    "XRPUSDT", "LTCUSDT", "LINKUSDT", "ATOMUSDT", "NEARUSDT",
+    "APTUSDT", "ARBUSDT", "OPUSDT", "FILUSDT", "ICPUSDT",
+    "ETCUSDT", "XLMUSDT", "ALGOUSDT", "VETUSDT", "SANDUSDT",
+    "AAVEUSDT", "RUNEUSDT", "INJUSDT", "TIAUSDT", "SUIUSDT",
+    "SEIUSDT", "TRXUSDT", "HBARUSDT", "CRVUSDT", "LDOUSDT",
+    "DYDXUSDT", "GRTUSDT", "WLDUSDT",
+]
 INTERVAL = "1h"                                   # Candle size: 1m/5m/15m/1h/4h/1d
 LOOKBACK = "730 day ago UTC"
 
