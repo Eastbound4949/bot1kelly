@@ -96,6 +96,7 @@ class PerformanceMonitor:
             "max_drawdown":     round(max_dd, 4),
             "total_return_pct": round(total_ret, 2),
             "portfolio_usd":    round(df["portfolio_usd"].iloc[-1], 2),
+            "risk_per_trade":   config.RISK_PER_TRADE,
             "as_of":            str(end),
         }
 
@@ -172,6 +173,7 @@ class PerformanceMonitor:
             f"Weekly bot report\n"
             f"Status: {status}\n\n"
             f"Portfolio: ${metrics['portfolio_usd']:,.2f} ({metrics['total_return_pct']:+.1f}%)\n"
+            f"Risk/trade: {metrics['risk_per_trade']:.0%}\n"
             f"Sharpe: {metrics['sharpe']:.2f} (target >1.0)\n"
             f"Win rate: {metrics['win_rate']:.1%} (target >52%)\n"
             f"Max drawdown: {metrics['max_drawdown']:.1%} (limit <20%)\n"

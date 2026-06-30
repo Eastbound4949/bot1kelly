@@ -21,7 +21,7 @@ TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # ─── Trading settings ──────────────────────────────────────────
-SYMBOL   = "BTCUSDT"                              # Primary / fallback pair (heartbeat only)
+SYMBOL   = os.environ.get("HEARTBEAT_SYMBOL", "DOGEUSDT")  # heartbeat pair — DOGE has tiny minimum notional vs BTC
 SYMBOLS  = [                                      # All pairs to scan each tick — matches bot-1-quant
     "BTCUSDT", "ETHUSDT", "SOLUSDT",
     "BNBUSDT", "XRPUSDT", "AVAXUSDT",
@@ -32,14 +32,28 @@ LOOKBACK = "730 day ago UTC"
 
 # 0.50 — ETHUSDT hold-out showed 77.3% precision at this level.
 BUY_THRESHOLD   = float(os.environ.get("BUY_THRESHOLD",   "0.50"))
-SELL_THRESHOLD  = float(os.environ.get("SELL_THRESHOLD",  "0.38"))
-SHORT_THRESHOLD = float(os.environ.get("SHORT_THRESHOLD", "0.50"))
-COVER_THRESHOLD = float(os.environ.get("COVER_THRESHOLD", "0.38"))
+SELL_THRESHOLD  = float(os.environ.get("SELL_THRESHOLD",  "0.45"))  # exit long when prob drops below here
+SHORT_THRESHOLD = float(os.environ.get("SHORT_THRESHOLD", "0.55"))  # raised from 0.50 — 90% precision at 0.55+ vs 50% at 0.50
+COVER_THRESHOLD = float(os.environ.get("COVER_THRESHOLD", "0.45"))  # exit short when prob drops below here
+
+# Minimum walk-forward precision to allow new LONG entries (skip weak models)
+MIN_LONG_WF_PRECISION = float(os.environ.get("MIN_LONG_WF_PRECISION", "0.42"))
 ENABLE_SHORTING = os.environ.get("ENABLE_SHORTING", "true").lower() == "true"
+ENABLE_LONGING  = os.environ.get("ENABLE_LONGING",  "true").lower() == "true"
+
+# ─── Fear & Greed filter ──────────────────────────────────────────────────────
+# Block shorts at Extreme Fear (squeeze risk) and Extreme Greed (strong uptrend).
+# Allow shorts in 25–75: trend is in motion, ML confirms direction.
+# Block longs at Extreme Greed (overbought) and Extreme Fear already falling.
+FNG_SHORT_MIN = int(os.environ.get("FNG_SHORT_MIN", "25"))   # below = block short
+FNG_SHORT_MAX = int(os.environ.get("FNG_SHORT_MAX", "75"))   # above = block short
+FNG_LONG_MIN  = int(os.environ.get("FNG_LONG_MIN",  "0"))    # below = block long
+FNG_LONG_MAX  = int(os.environ.get("FNG_LONG_MAX",  "45"))   # above = block long
+ENABLE_FNG    = os.environ.get("ENABLE_FNG", "false").lower() == "true"
 
 # ─── Paper trading ─────────────────────────────────────────────
 PAPER_STARTING_BALANCE = 10_000   # Simulated USDT
-RISK_PER_TRADE         = 0.015    # Risk 1.5% of portfolio per trade (+50% vs 1%)
+RISK_PER_TRADE         = float(os.environ.get("RISK_PER_TRADE", "0.20"))  # Risk % of free balance per trade
 MAX_POSITION_PCT       = 0.90     # Cap position at 90% of balance
 STOP_LOSS_PCT          = 0.025    # Hard stop: 2.5% below/above entry (safety floor)
 TAKE_PROFIT_ATR_MULT   = 3.5      # TP at entry ± 3.5 × ATR (was 2.5)
@@ -69,17 +83,8 @@ RETRAIN_DAYS   = 7            # Retrain every N days
 # with a non-datacenter IP instead. OKX was tried but is account/KYC-blocked for this user.
 LIVE_TRADING          = os.environ.get("LIVE_TRADING",          "false").lower() == "true"
 LEVERAGE              = int(os.environ.get("LEVERAGE",              "3"))
+MAX_LEVERAGE          = int(os.environ.get("MAX_LEVERAGE",          "10"))   # cap dynamic leverage (was 40 — too high for small accounts)
 MAX_CONCURRENT_TRADES = int(os.environ.get("MAX_CONCURRENT_TRADES", "2"))
 FUTURES_EXCHANGE      = os.environ.get("FUTURES_EXCHANGE",      "binanceusdm")
+MIN_FREE_BALANCE      = float(os.environ.get("MIN_FREE_BALANCE",    "15"))   # skip new entries if free USDT < this
 
-# ─── Reverse Kelly / risk-tapering bands ──────────────────────
-# Band 1 $100–$200:  20% risk, aggressive — die cheap if it fails
-# Band 2 $200–$400:  10% risk — still pushing
-# Band 3 $400–$700:  5% risk — protect the progress
-# Band 4 $700–$1000: 2.5% risk — conservative close-out
-KELLY_BANDS = [
-    {"band": 1, "min": 0,   "max": 200,  "risk_pct": 0.20,  "label": "aggressive"},
-    {"band": 2, "min": 200, "max": 400,  "risk_pct": 0.10,  "label": "pushing"},
-    {"band": 3, "min": 400, "max": 700,  "risk_pct": 0.05,  "label": "protect"},
-    {"band": 4, "min": 700, "max": 1000, "risk_pct": 0.025, "label": "conservative"},
-]

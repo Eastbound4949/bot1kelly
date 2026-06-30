@@ -15,7 +15,7 @@ import json
 import os
 import pickle
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 _BOT_DIR = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 
@@ -49,6 +49,35 @@ def send_telegram(message: str):
         print(f"[telegram] Failed: {e}")
 
 
+# ─── Fear & Greed index ──────────────────────────────────────────────────────
+_fng_cache: dict = {"value": None, "ts": 0}
+
+def fetch_fear_greed() -> int:
+    """Return current crypto Fear & Greed index (0–100). Cached 1h."""
+    now = datetime.now(timezone.utc).timestamp()
+    if _fng_cache["value"] is not None and now - _fng_cache["ts"] < 3600:
+        return _fng_cache["value"]
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=8)
+        val = int(r.json()["data"][0]["value"])
+        _fng_cache["value"] = val
+        _fng_cache["ts"] = now
+        return val
+    except Exception as e:
+        print(f"[fng] fetch failed: {e} — defaulting to 50 (neutral)")
+        return _fng_cache["value"] if _fng_cache["value"] is not None else 50
+
+
+def _fng_allows_short(fng: int) -> bool:
+    """Block shorts only at extremes where trend reversal risk is high."""
+    return config.FNG_SHORT_MIN <= fng <= config.FNG_SHORT_MAX
+
+
+def _fng_allows_long(fng: int) -> bool:
+    """Block longs only at extremes where trend reversal risk is high."""
+    return config.FNG_LONG_MIN <= fng <= config.FNG_LONG_MAX
+
+
 # ─── Data fetching ────────────────────────────────────────────────────────────
 
 def fetch_latest_data(symbol: str) -> tuple[pd.DataFrame, pd.DataFrame | None]:
@@ -71,7 +100,10 @@ def load_model(symbol: str) -> tuple:
     with open(mf, "rb") as f:
         payload = pickle.load(f)
 
-    age_days = (datetime.utcnow() - datetime.fromisoformat(payload["trained_at"])).days
+    trained_dt = datetime.fromisoformat(payload["trained_at"])
+    if trained_dt.tzinfo is None:
+        trained_dt = trained_dt.replace(tzinfo=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - trained_dt).days
     if age_days >= config.RETRAIN_DAYS:
         print(f"[bot] {symbol} model is {age_days}d old — retraining...")
         train_and_save(symbol, mf)
@@ -91,7 +123,10 @@ def load_short_model(symbol: str) -> tuple | None:
         train_and_save_short(symbol, mf)
     with open(mf, "rb") as f:
         payload = pickle.load(f)
-    age_days = (datetime.utcnow() - datetime.fromisoformat(payload["trained_at"])).days
+    trained_dt = datetime.fromisoformat(payload["trained_at"])
+    if trained_dt.tzinfo is None:
+        trained_dt = trained_dt.replace(tzinfo=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - trained_dt).days
     if age_days >= config.RETRAIN_DAYS:
         print(f"[bot] {symbol} short model is {age_days}d old — retraining...")
         train_and_save_short(symbol, mf)
@@ -150,16 +185,6 @@ def _bearish_regime_ok(df: pd.DataFrame, prob: float = 0.0) -> bool:
         no_extreme_vol and
         (not config.REQUIRE_HTF_TREND or htf_trend_down)
     )
-
-
-# ─── Kelly band helpers ───────────────────────────────────────────────────────
-
-def get_kelly_band(balance: float) -> dict:
-    """Return the risk-tapering band for the current balance."""
-    for band in config.KELLY_BANDS:
-        if balance < band["max"]:
-            return band
-    return config.KELLY_BANDS[-1]
 
 
 def _futures_symbol(symbol: str) -> str:
@@ -459,6 +484,7 @@ class LiveTrader:
         self._exchange.has["fetchCurrencies"] = False  # skip geo-blocked private endpoint
         self._state_file = os.path.join(_BOT_DIR, "live_trail_state.json")
         self._live_state: dict = self._load_live_state()
+        self._entries, self._wins, self._losses = self._load_live_stats()
         _delay = 30
         for _attempt in range(1, 9999):
             try:
@@ -516,7 +542,15 @@ class LiveTrader:
     def _cancel_open_orders(self, fsym: str) -> bool:
         try:
             self._exchange.cancel_all_orders(fsym)
-            time.sleep(0.35)  # let Binance process cancel before placing new orders
+            time.sleep(0.5)
+            # verify cancellation — Binance processes async; retry if orders still open
+            try:
+                remaining = self._exchange.fetch_open_orders(fsym)
+                if remaining:
+                    self._exchange.cancel_all_orders(fsym)
+                    time.sleep(0.5)
+            except Exception:
+                pass  # non-fatal; proceed and let -4130 retry next bar if it occurs
             return True
         except Exception as e:
             print(f"[live] cancel_all_orders {fsym}: {e}")
@@ -532,6 +566,30 @@ class LiveTrader:
             except Exception:
                 pass
         return {}
+
+    def _load_live_stats(self) -> tuple:
+        """Read trades/wins/losses from CSV log. Returns (entries, wins, losses)."""
+        try:
+            if not os.path.exists(self._log_file):
+                return 0, 0, 0
+            df = pd.read_csv(self._log_file)
+            if df.empty:
+                return 0, 0, 0
+            entries = int(df["action"].str.contains(r"^LIVE (BUY|SELL|SHORT)", na=False, regex=True).sum())
+            closes = df[df["action"].str.contains("ML-CLOSE", na=False)]
+            if "pnl_usd" in df.columns:
+                wins   = int((closes["pnl_usd"] > 0).sum())
+                losses = int((closes["pnl_usd"] <= 0).sum() - (closes["pnl_usd"] == 0).sum())
+            else:
+                wins, losses = 0, 0
+            return entries, wins, losses
+        except Exception:
+            return 0, 0, 0
+
+    def _fmt_stats(self) -> str:
+        """Return compact stats string for Telegram."""
+        wr = (self._wins / max(self._wins + self._losses, 1)) * 100 if (self._wins + self._losses) else 0
+        return f"T:{self._entries} W:{self._wins} L:{self._losses} WR:{wr:.0f}%"
 
     def _save_live_state(self, symbol: str, state: dict):
         self._live_state[symbol] = state
@@ -633,11 +691,10 @@ class LiveTrader:
 
         # ── New entry ─────────────────────────────────────────────────────────
         balance = self._free_balance()
-        if balance < 5:
-            return f"HOLD — insufficient balance ${balance:.2f}"
+        if balance < config.MIN_FREE_BALANCE:
+            return f"HOLD — free balance ${balance:.2f} below minimum ${config.MIN_FREE_BALANCE}"
 
-        kelly = get_kelly_band(balance)
-        risk_amount = balance * kelly["risk_pct"]
+        risk_amount = balance * config.RISK_PER_TRADE
 
         # Fetch actual Binance price before sizing — KuCoin signal price may be stale/diverged
         try:
@@ -657,7 +714,7 @@ class LiveTrader:
 
         # Dynamic leverage: max where stop fires before liquidation (0.80 safety buffer for MMR+slippage)
         stop_pct = stop_distance / live_price
-        dynamic_lev = max(1, min(int(0.80 / stop_pct), 40))
+        dynamic_lev = max(1, min(int(0.80 / stop_pct), config.MAX_LEVERAGE))
 
         units = risk_amount / stop_distance
         notional = units * live_price
@@ -703,8 +760,7 @@ class LiveTrader:
         result = (
             f"LIVE {signal} {units} {symbol} @ ${entry_price:,.2f} | "
             f"SL: ${sl_str:,.2f} | TP: ${tp_str:,.2f} | R:R: {rr:.2f} | "
-            f"Lev: {dynamic_lev}x | Band {kelly['band']} ({kelly['label']}) | "
-            f"Risk: {kelly['risk_pct']:.1%} = ${risk_amount:.2f}"
+            f"Lev: {dynamic_lev}x | Risk: {config.RISK_PER_TRADE:.0%} = ${risk_amount:.2f}"
         )
         self._save_live_state(symbol, {
             "side":             "long" if signal == "BUY" else "short",
@@ -720,37 +776,50 @@ class LiveTrader:
         return result
 
     def run_heartbeat_trade(self) -> str:
-        """Open + immediately close the smallest possible position on SYMBOL.
-        Run once per startup/redeploy to prove the exchange connection,
-        order execution, and Telegram relay are all working end-to-end."""
-        fsym = _futures_symbol(config.SYMBOL)
-        try:
-            market   = self._exchange.markets[fsym]
-            min_amt  = market.get("limits", {}).get("amount", {}).get("min") or 0
-            min_cost = market.get("limits", {}).get("cost", {}).get("min") or 0
+        """Open + immediately close the smallest possible position. Tries configured SYMBOL first,
+        then falls back through DOGEUSDT / XRPUSDT if insufficient margin (-2019)."""
+        fallback_order = [config.SYMBOL, "DOGEUSDT", "XRPUSDT", "ADAUSDT"]
+        tried = []
+        for sym in dict.fromkeys(fallback_order):  # deduplicate, preserve order
+            fsym = _futures_symbol(sym)
+            tried.append(sym)
+            try:
+                market   = self._exchange.markets.get(fsym, {})
+                min_amt  = market.get("limits", {}).get("amount", {}).get("min") or 0
+                min_cost = market.get("limits", {}).get("cost", {}).get("min") or 0
 
-            ticker = self._exchange.fetch_ticker(fsym)
-            price  = float(ticker["last"])
+                ticker = self._exchange.fetch_ticker(fsym)
+                price  = float(ticker["last"])
 
-            units = max(min_amt, (min_cost / price) if price else 0)
-            units = float(self._exchange.amount_to_precision(fsym, units * 1.05))  # small buffer over exchange minimum
-            if units <= 0:
-                raise ValueError("could not determine minimum order size")
+                units = max(min_amt, (min_cost / price) if price else 0)
+                units = float(self._exchange.amount_to_precision(fsym, units * 1.05))
+                if units <= 0:
+                    raise ValueError("could not determine minimum order size")
 
-            self._set_leverage(fsym, 1)
-            open_order  = self._exchange.create_order(fsym, "market", "buy", units)
-            entry_price = float(open_order.get("average") or open_order.get("price") or price)
+                self._set_leverage(fsym, 1)
+                open_order  = self._exchange.create_order(fsym, "market", "buy", units)
+                entry_price = float(open_order.get("average") or open_order.get("price") or price)
 
-            close_order = self._exchange.create_order(fsym, "market", "sell", units, params={"reduceOnly": True})
-            exit_price  = float(close_order.get("average") or close_order.get("price") or price)
+                close_order = self._exchange.create_order(fsym, "market", "sell", units, params={"reduceOnly": True})
+                exit_price  = float(close_order.get("average") or close_order.get("price") or price)
 
-            msg = (
-                f"HEARTBEAT OK — {config.SYMBOL} open+close {units} @ ~${entry_price:,.2f} "
-                f"-> ~${exit_price:,.2f} (fees only, position flat)"
-            )
-        except Exception as e:
-            msg = f"HEARTBEAT FAILED — {config.SYMBOL}: {e}"
+                msg = (
+                    f"HEARTBEAT OK — {sym} open+close {units} "
+                    f"@ ~${entry_price:,.4f} -> ~${exit_price:,.4f} (fees only, flat)"
+                )
+                print(f"[live] {msg}")
+                send_telegram(f"*Startup Heartbeat*\n{msg}")
+                return msg
+            except Exception as e:
+                if "-2019" in str(e) or "Margin is insufficient" in str(e):
+                    print(f"[live] Heartbeat {sym}: insufficient margin, trying next...")
+                    continue
+                msg = f"HEARTBEAT FAILED — {sym}: {e}"
+                print(f"[live] {msg}")
+                send_telegram(f"*Startup Heartbeat*\n{msg}")
+                return msg
 
+        msg = f"HEARTBEAT SKIPPED — all symbols ({', '.join(tried)}) have insufficient margin (balance too low)"
         print(f"[live] {msg}")
         send_telegram(f"*Startup Heartbeat*\n{msg}")
         return msg
@@ -758,27 +827,26 @@ class LiveTrader:
     def portfolio_value(self, _price: float = 0.0) -> float:
         try:
             b = self._exchange.fetch_balance()
-            total = float(b.get("USDT", {}).get("total", 0))
-            upnl = sum(float(p.get("unrealizedPnl", 0)) for p in self._open_positions())
-            return total + upnl
+            # Binance USDT-M: USDT["total"] = totalMarginBalance (walletBalance + uPnL already).
+            # Do NOT add unrealizedPnL separately — it would double-count uPnL.
+            return float(b.get("USDT", {}).get("total", 0))
         except Exception as e:
             print(f"[live] portfolio_value: {e}")
             return 0.0
 
-    def log_trade(self, timestamp, symbol, signal, price, prob, action):
+    def log_trade(self, timestamp, symbol, signal, price, prob, action, pnl_usd: float = 0.0):
         balance = self._free_balance()
-        kelly = get_kelly_band(balance)
         row = {
-            "timestamp":      timestamp,
-            "symbol":         symbol,
-            "price":          round(price, 4),
-            "ml_prob":        round(prob, 4),
-            "signal":         signal,
-            "action":         action,
-            "balance_usdt":   round(balance, 2),
-            "portfolio_usd":  round(self.portfolio_value(), 2),
-            "kelly_band":     kelly["band"],
-            "kelly_risk_pct": kelly["risk_pct"],
+            "timestamp":     timestamp,
+            "symbol":        symbol,
+            "price":         round(price, 4),
+            "ml_prob":       round(prob, 4),
+            "signal":        signal,
+            "action":        action,
+            "pnl_usd":       round(pnl_usd, 4),
+            "balance_usdt":  round(balance, 2),
+            "portfolio_usd": round(self.portfolio_value(), 2),
+            "risk_pct":      config.RISK_PER_TRADE,
         }
         file_exists = os.path.exists(self._log_file)
         with open(self._log_file, "a", newline="") as f:
@@ -787,10 +855,10 @@ class LiveTrader:
                 writer.writeheader()
             writer.writerow(row)
 
-    def _log(self, symbol, signal, price, action):
+    def _log(self, symbol, signal, price, action, pnl_usd: float = 0.0):
         self.log_trade(
-            datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
-            symbol, signal, price, 0.0, action,
+            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            symbol, signal, price, 0.0, action, pnl_usd=pnl_usd,
         )
 
 
@@ -839,7 +907,7 @@ paper_trader: PaperTrader | LiveTrader = LiveTrader() if config.LIVE_TRADING els
 
 def _run_live_bot():
     """Live-mode tick: monitor open futures positions, then scan for entries."""
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"\n{'-'*55}")
     print(f"[live] Running at {now}")
 
@@ -847,18 +915,36 @@ def _run_live_bot():
         open_positions = paper_trader._open_positions()
         balance = paper_trader._free_balance()
         portfolio_val = paper_trader.portfolio_value()
-        kelly = get_kelly_band(balance)
 
         print(
             f"[live] Balance: ${balance:,.2f} | Portfolio: ${portfolio_val:,.2f} | "
-            f"Band {kelly['band']} ({kelly['label']}) | Open positions: {len(open_positions)}"
+            f"Risk: {config.RISK_PER_TRADE:.0%}/trade | Open positions: {len(open_positions)}"
         )
 
-        # Clean up state for positions closed by exchange SL/TP
+        # Detect SL/TP-closed positions: in state but not in open_positions anymore
         open_syms = {p["symbol"].split("/")[0] + "USDT" for p in open_positions}
         for sym in list(paper_trader._live_state.keys()):
             if sym not in open_syms:
+                state = paper_trader._live_state.get(sym, {})
+                side = state.get("side", "?")
+                entry_p = state.get("entry_price", 0)
+                sl_p    = state.get("trail_stop", 0)
+                tp_p    = state.get("tp_price", 0)
+                paper_trader._entries += 1 if entry_p else 0
                 paper_trader._clear_live_state(sym)
+                dir_emoji = "📈" if side == "long" else "📉"
+                sl_str = f"SL≈${sl_p:,.4f}" if sl_p else "SL?"
+                tp_str = f"TP≈${tp_p:,.4f}" if tp_p else "TP?"
+                now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                close_msg = (
+                    f"🔔 *Position Closed by Exchange*\n"
+                    f"{dir_emoji} {sym} {side.upper()} — SL/TP hit\n"
+                    f"Entry: ${entry_p:,.4f} | {sl_str} | {tp_str}\n"
+                    f"Balance: ${balance:,.2f} | Portfolio: ${portfolio_val:,.2f}\n"
+                    f"{paper_trader._fmt_stats()}"
+                )
+                send_telegram(close_msg)
+                paper_trader.log_trade(now_str, sym, "SL/TP", entry_p, 0.0, f"CLOSED by exchange ({side})")
 
         # Phase 1: monitor open positions for ML-driven exits
         for pos in open_positions:
@@ -884,12 +970,16 @@ def _run_live_bot():
                     send_telegram(f"*Trail Updated*\n{sym} @ ${price:,.4f}\n{trail_msg}")
 
                 if side == "long":
-                    model, fcols = load_model(sym)
-                    for c in fcols:
-                        if c not in df.columns:
-                            df[c] = np.nan
-                    prob = float(model.predict_proba(df[fcols].iloc[[-1]])[0][1])
-                    signal = "SELL" if prob <= config.SELL_THRESHOLD else "HOLD"
+                    if not config.ENABLE_LONGING:
+                        signal = "SELL"
+                        prob = 0.0
+                    else:
+                        model, fcols = load_model(sym)
+                        for c in fcols:
+                            if c not in df.columns:
+                                df[c] = np.nan
+                        prob = float(model.predict_proba(df[fcols].iloc[[-1]])[0][1])
+                        signal = "SELL" if prob <= config.SELL_THRESHOLD else "HOLD"
                 else:
                     short_result = load_short_model(sym)
                     if short_result:
@@ -909,8 +999,24 @@ def _run_live_bot():
                 )
                 if action.startswith("ML-CLOSE"):
                     paper_trader._clear_live_state(sym)
-                    send_telegram(f"*Trade Closed*\n{sym} {signal} @ ${price:,.4f}\n{action}")
-                paper_trader.log_trade(now, sym, signal, price, prob, action)
+                    if upnl >= 0:
+                        paper_trader._wins += 1
+                        outcome_emoji = "✅ WIN"
+                    else:
+                        paper_trader._losses += 1
+                        outcome_emoji = "❌ LOSS"
+                    dir_emoji = "📈" if side == "long" else "📉"
+                    close_telegram = (
+                        f"{outcome_emoji} *ML-Exit*\n"
+                        f"{dir_emoji} {sym} {side.upper()} @ ${price:,.4f}\n"
+                        f"uPnL: ${upnl:+,.2f}\n"
+                        f"Portfolio: ${portfolio_val:,.2f} | Balance: ${balance:,.2f}\n"
+                        f"{paper_trader._fmt_stats()}"
+                    )
+                    send_telegram(close_telegram)
+                    paper_trader.log_trade(now, sym, signal, price, prob, action, pnl_usd=upnl)
+                else:
+                    paper_trader.log_trade(now, sym, signal, price, prob, action)
 
             except Exception as e:
                 print(f"[live] monitor {sym}: {e}")
@@ -919,17 +1025,22 @@ def _run_live_bot():
         open_positions = paper_trader._open_positions()
         n_open = len(open_positions)
         open_syms = {pos["symbol"].split("/")[0] + "USDT" for pos in open_positions}
+        open_upnl = sum(float(p.get("unrealizedPnl", 0)) for p in open_positions)
 
         msg_header = (
-            f"*Live Bot — {now}*\n"
-            f"Balance: ${balance:,.2f} | Portfolio: ${portfolio_val:,.2f}\n"
-            f"Band {kelly['band']} ({kelly['label']}) | Open: {n_open}"
+            f"*Kelly Bot — {now}*\n"
+            f"💰 Portfolio: ${portfolio_val:,.2f} | Free: ${balance:,.2f}\n"
+            f"📊 {paper_trader._fmt_stats()} | Open: {n_open} (uPnL ${open_upnl:+,.2f})\n"
+            f"Risk: {config.RISK_PER_TRADE:.0%}/trade"
         )
 
-        utc_hour = datetime.utcnow().hour
+        utc_hour = datetime.now(timezone.utc).hour
         if not (5 <= utc_hour < 20):
             print(f"[live] Outside entry session ({utc_hour:02d} UTC) — skipping scan")
             return
+
+        fng = fetch_fear_greed()
+        print(f"[live] Fear & Greed: {fng}")
 
         candidates = _scan_symbols()
         if not candidates:
@@ -943,11 +1054,26 @@ def _run_live_bot():
 
             signal    = "HOLD"
             exec_prob = 0.0
-            if buy_prob >= config.BUY_THRESHOLD and _regime_ok(sym_df, buy_prob):
-                signal = "BUY"
-                exec_prob = buy_prob
-            elif (
+            fng_long_ok  = not config.ENABLE_FNG or _fng_allows_long(fng)
+            fng_short_ok = not config.ENABLE_FNG or _fng_allows_short(fng)
+            if config.ENABLE_LONGING and fng_long_ok and buy_prob >= config.BUY_THRESHOLD and _regime_ok(sym_df, buy_prob):
+                # Walk-fwd precision guard: skip LONG if model is below threshold
+                mf = model_file_for(sym)
+                wf_prec = 0.0
+                if os.path.exists(mf):
+                    try:
+                        with open(mf, "rb") as _f:
+                            wf_prec = pickle.load(_f).get("walk_fwd_precision", 0.0)
+                    except Exception:
+                        wf_prec = 0.0
+                if wf_prec < config.MIN_LONG_WF_PRECISION:
+                    print(f"[live] {sym}: LONG skipped — walk-fwd {wf_prec:.1%} < {config.MIN_LONG_WF_PRECISION:.0%}")
+                else:
+                    signal = "BUY"
+                    exec_prob = buy_prob
+            if signal == "HOLD" and (
                 config.ENABLE_SHORTING
+                and fng_short_ok
                 and sh_prob >= config.SHORT_THRESHOLD
                 and _bearish_regime_ok(sym_df, sh_prob)
             ):
@@ -960,18 +1086,26 @@ def _run_live_bot():
             any_signal = True
             action = paper_trader.execute(signal, sym_price, sym_atr, sym)
             print(f"[live] Signal: {signal} → {action}")
-            send_telegram(
-                f"{msg_header}\n"
-                f"{sym} Signal: *{signal}* ({exec_prob:.1%}) → {action}"
-            )
-            paper_trader.log_trade(now, sym, signal, sym_price, exec_prob, action)
 
             if not action.startswith("HOLD"):
-                open_syms.add(sym)  # prevent double-entry same tick
+                paper_trader._entries += 1
+                dir_emoji = "📈" if signal == "BUY" else "📉"
+                entry_telegram = (
+                    f"{dir_emoji} *{signal} Signal* — {sym}\n"
+                    f"Price: ${sym_price:,.4f} | ML: {exec_prob:.1%}\n"
+                    f"{action}\n"
+                    f"{msg_header}"
+                )
+                send_telegram(entry_telegram)
+                open_syms.add(sym)
+            else:
+                send_telegram(f"{msg_header}\n{sym}: {signal} ({exec_prob:.1%}) — {action}")
+            paper_trader.log_trade(now, sym, signal, sym_price, exec_prob, action)
 
         if not any_signal:
-            print(f"[live] Signal: HOLD → HOLD — no qualifying signals")
-            send_telegram(f"{msg_header}\nHOLD — no qualifying signals")
+            fng_label = "Extreme Fear" if fng < 25 else "Fear" if fng < 45 else "Neutral" if fng < 55 else "Greed" if fng < 75 else "Extreme Greed"
+            print(f"[live] Signal: HOLD → HOLD — no qualifying signals (F&G: {fng} {fng_label})")
+            send_telegram(f"{msg_header}\nF&G: {fng} ({fng_label})\n-- HOLD — no qualifying signals --")
 
     except Exception as e:
         err = f"[live] ERROR: {e}"
@@ -984,7 +1118,7 @@ def run_bot():
         _run_live_bot()
         return
 
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"\n{'-'*55}")
     print(f"[bot] Running at {now}")
 
@@ -1063,7 +1197,7 @@ def run_bot():
 
         # ── Phase 3: Scan for best entry opportunity (LONG or SHORT) ──────────
         # Session gate: only enter 05:00-20:00 UTC (active liquidity hours)
-        utc_hour = datetime.utcnow().hour
+        utc_hour = datetime.now(timezone.utc).hour
         if not (5 <= utc_hour < 20):
             print(f"[bot] Outside entry session ({utc_hour:02d} UTC) — skipping scan")
             return
@@ -1088,14 +1222,20 @@ def run_bot():
             sh_tag = "↓" if _bearish_regime_ok(sh_df, sh_prob) else "↑regime"
             print(f"[bot] Best SHORT: {sh_sym} prob={sh_prob:.1%} ${sh_price:,.4f} {sh_tag}")
 
+        fng = fetch_fear_greed()
+        fng_label = "Extreme Fear" if fng < 25 else "Fear" if fng < 45 else "Neutral" if fng < 55 else "Greed" if fng < 75 else "Extreme Greed"
+        fng_long_ok  = not config.ENABLE_FNG or _fng_allows_long(fng)
+        fng_short_ok = not config.ENABLE_FNG or _fng_allows_short(fng)
+        print(f"[bot] Fear & Greed: {fng} ({fng_label}) | long_ok={fng_long_ok} short_ok={fng_short_ok}")
+
         signal     = "HOLD"
         action_sym = best_sym
         action_price, action_atr = best_price, best_atr
         exec_prob  = best_prob
 
-        if best_prob >= config.BUY_THRESHOLD and _regime_ok(best_df, best_prob):
+        if config.ENABLE_LONGING and fng_long_ok and best_prob >= config.BUY_THRESHOLD and _regime_ok(best_df, best_prob):
             signal = "BUY"
-        elif config.ENABLE_SHORTING and sh_prob >= config.SHORT_THRESHOLD and _bearish_regime_ok(sh_df, sh_prob):
+        elif config.ENABLE_SHORTING and fng_short_ok and sh_prob >= config.SHORT_THRESHOLD and _bearish_regime_ok(sh_df, sh_prob):
             signal = "SHORT"
             action_sym, action_price, action_atr = sh_sym, sh_price, sh_atr
             exec_prob = sh_prob
@@ -1112,6 +1252,7 @@ def run_bot():
             f"*{action_sym} Signal — {now}*\n"
             f"Price: ${action_price:,.4f}\n"
             f"ML signal: *{signal}* ({exec_prob:.1%}) {trend_tag}\n"
+            f"F&G: {fng} ({fng_label})\n"
             f"Action: {action}\n"
             f"Portfolio: ${portfolio_val:,.2f} ({total_return:+.2f}%)\n"
             f"Trades: {paper_trader.trades} | Win rate: {win_rate:.0f}%"
@@ -1136,8 +1277,6 @@ if __name__ == "__main__":
     if config.LIVE_TRADING:
         print(f" Exchange: {config.FUTURES_EXCHANGE} | Leverage: dynamic (max before liquidation, cap 40x)")
         print(f" Max concurrent trades: {config.MAX_CONCURRENT_TRADES}")
-        _bands = ", ".join(f"${b['min']}-{b['max']} {b['risk_pct']:.0%}" for b in config.KELLY_BANDS)
-        print(f" Kelly bands: [{_bands}]")
     else:
         print(f" Balance:  ${config.PAPER_STARTING_BALANCE:,.0f} (paper)")
     print(f" BUY threshold: {config.BUY_THRESHOLD:.0%} | Risk/trade: {config.RISK_PER_TRADE:.0%}")
