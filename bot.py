@@ -540,21 +540,38 @@ class LiveTrader:
         return {"stopPrice": trigger, "closePosition": True}
 
     def _cancel_open_orders(self, fsym: str) -> bool:
+        """Cancel every open order for fsym by explicit ID and poll until Binance
+        confirms none remain. cancel_all_orders + a fixed sleep is not reliable —
+        it can return success while closePosition STOP_MARKET/TAKE_PROFIT_MARKET
+        orders are still being processed, causing -4130 on the immediate re-place."""
         try:
-            self._exchange.cancel_all_orders(fsym)
+            orders = self._exchange.fetch_open_orders(fsym)
+        except Exception as e:
+            print(f"[live] fetch_open_orders {fsym}: {e}")
+            orders = []
+
+        for o in orders:
+            try:
+                self._exchange.cancel_order(o["id"], fsym)
+            except Exception as e:
+                print(f"[live] cancel_order {fsym} {o.get('id')}: {e}")
+
+        for _ in range(6):
             time.sleep(0.5)
-            # verify cancellation — Binance processes async; retry if orders still open
             try:
                 remaining = self._exchange.fetch_open_orders(fsym)
-                if remaining:
-                    self._exchange.cancel_all_orders(fsym)
-                    time.sleep(0.5)
             except Exception:
-                pass  # non-fatal; proceed and let -4130 retry next bar if it occurs
-            return True
-        except Exception as e:
-            print(f"[live] cancel_all_orders {fsym}: {e}")
-            return False
+                continue
+            if not remaining:
+                return True
+            for o in remaining:
+                try:
+                    self._exchange.cancel_order(o["id"], fsym)
+                except Exception as e:
+                    print(f"[live] cancel_order retry {fsym} {o.get('id')}: {e}")
+
+        print(f"[live] cancel_open_orders {fsym}: orders still open after retries")
+        return False
 
     # ── Trail state persistence ───────────────────────────────────────────────
 
