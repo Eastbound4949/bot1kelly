@@ -46,8 +46,9 @@ LOG_FILE               = os.environ.get("LOG_FILE", "trades_log.csv")
 # ─── Regime filter ─────────────────────────────────────────────────────────────
 TREND_FILTER        = os.environ.get("TREND_FILTER",       "true").lower() == "true"
 ADX_TREND_THRESHOLD = int(os.environ.get("ADX_TREND_THRESHOLD", "20"))
-EMA_ALIGN_THRESHOLD = int(os.environ.get("EMA_ALIGN_THRESHOLD", "2"))
+EMA_ALIGN_THRESHOLD = int(os.environ.get("EMA_ALIGN_THRESHOLD", "1"))
 REQUIRE_HTF_TREND   = os.environ.get("REQUIRE_HTF_TREND",  "false").lower() == "true"
+REGIME_BYPASS_THRESHOLD = float(os.environ.get("REGIME_BYPASS_THRESHOLD", "0.75"))  # skip regime if ML prob >= this
 
 # ─── Model ─────────────────────────────────────────────────────────────────────
 MODEL_FILE   = "model.pkl"
