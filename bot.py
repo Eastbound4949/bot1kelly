@@ -573,6 +573,21 @@ class LiveTrader:
         print(f"[live] cancel_open_orders {fsym}: orders still open after retries")
         return False
 
+    def _place_close_order(self, fsym: str, order_type: str, close_side: str,
+                            units: float, trigger: float, tries: int = 3, delay: float = 0.5):
+        """Place a closePosition SL/TP order, retrying on Binance's -4130 (stale
+        closePosition order still settling server-side after cancel)."""
+        params = self._sl_params(trigger) if order_type == "stop_market" else self._tp_params(trigger)
+        last_err = None
+        for attempt in range(tries):
+            try:
+                return self._exchange.create_order(fsym, order_type, close_side, units, params=params), None
+            except Exception as e:
+                last_err = e
+                if attempt < tries - 1:
+                    time.sleep(delay)
+        return None, last_err
+
     # ── Trail state persistence ───────────────────────────────────────────────
 
     def _load_live_state(self) -> dict:
@@ -651,22 +666,25 @@ class LiveTrader:
             print(f"[live] trail skip {symbol}: cancel failed, state unchanged")
             return None
 
-        sl_ok = False
-        try:
-            self._exchange.create_order(fsym, "stop_market", close_side, units,
-                                        params=self._sl_params(sl_prec))
-            sl_ok = True
-        except Exception as e:
-            print(f"[live] trail SL order failed: {e}")
-        try:
-            self._exchange.create_order(fsym, "take_profit_market", close_side, units,
-                                        params=self._tp_params(tp_prec))
-        except Exception as e:
-            print(f"[live] trail TP re-place failed: {e}")
-
-        if not sl_ok:
-            print(f"[live] trail state unchanged for {symbol}: SL order failed, will retry next bar")
+        sl_order, sl_err = self._place_close_order(fsym, "stop_market", close_side, units, sl_prec)
+        if sl_order is None:
+            # New SL failed after retries and old one is already cancelled — position
+            # is naked. Restore the PRIOR stop immediately rather than leave it unprotected
+            # until the next bar (up to 1h away on this schedule).
+            print(f"[live] trail SL order failed after retries: {sl_err}")
+            fallback_prec = float(self._exchange.price_to_precision(fsym, current_trail))
+            restore_order, restore_err = self._place_close_order(fsym, "stop_market", close_side, units, fallback_prec)
+            if restore_order is None:
+                print(f"[live] CRITICAL: {symbol} has NO STOP LOSS — restore also failed: {restore_err}")
+                send_telegram(f"CRITICAL: {symbol} live position has NO STOP LOSS attached — manual check needed. {restore_err}")
+            else:
+                print(f"[live] trail SL restore OK: kept prior SL ${fallback_prec:,.2f}")
             return None
+
+        tp_order, tp_err = self._place_close_order(fsym, "take_profit_market", close_side, units, tp_prec)
+        if tp_order is None:
+            print(f"[live] trail TP re-place failed after retries: {tp_err}")
+            send_telegram(f"WARNING: {symbol} trail update lost TP order (SL ok @ ${sl_prec:,.2f}). {tp_err}")
 
         state["trail_stop"] = sl_prec
         self._save_live_state(symbol, state)
@@ -762,17 +780,23 @@ class LiveTrader:
         sl_str = float(self._exchange.price_to_precision(fsym, sl_price))
         tp_str = float(self._exchange.price_to_precision(fsym, tp_price))
 
-        try:
-            self._exchange.create_order(fsym, "stop_market", close_side, units,
-                                        params=self._sl_params(sl_str))
-        except Exception as e:
-            print(f"[live] SL order failed: {e}")
+        sl_order, sl_err = self._place_close_order(fsym, "stop_market", close_side, units, sl_str)
+        if sl_order is None:
+            # No stop-loss could be attached — do not run a leveraged position naked.
+            # Emergency-close at market immediately.
+            print(f"[live] SL order failed after retries: {sl_err} — emergency-closing position")
+            try:
+                self._exchange.create_order(fsym, "market", close_side, units, params={"reduceOnly": True})
+                send_telegram(f"WARNING: {symbol} entry SL failed ({sl_err}) — position emergency-closed, no trade taken.")
+            except Exception as e2:
+                print(f"[live] CRITICAL: emergency close also failed: {e2}")
+                send_telegram(f"CRITICAL: {symbol} has NO STOP LOSS and emergency close FAILED — manual check needed. {e2}")
+            return f"ABORTED {signal} {symbol} @ ${entry_price:,.2f} — SL failed, position closed"
 
-        try:
-            self._exchange.create_order(fsym, "take_profit_market", close_side, units,
-                                        params=self._tp_params(tp_str))
-        except Exception as e:
-            print(f"[live] TP order failed: {e}")
+        tp_order, tp_err = self._place_close_order(fsym, "take_profit_market", close_side, units, tp_str)
+        if tp_order is None:
+            print(f"[live] TP order failed after retries: {tp_err}")
+            send_telegram(f"WARNING: {symbol} entry has no TP order (SL ok @ ${sl_str:,.2f}). {tp_err}")
 
         result = (
             f"LIVE {signal} {units} {symbol} @ ${entry_price:,.2f} | "

@@ -24,17 +24,17 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 SYMBOL   = os.environ.get("HEARTBEAT_SYMBOL", "DOGEUSDT")  # heartbeat pair — DOGE has tiny minimum notional vs BTC
 SYMBOLS  = [                                      # All pairs to scan each tick — matches bot-1-quant
     "BTCUSDT", "ETHUSDT", "SOLUSDT",
-    "BNBUSDT", "XRPUSDT", "AVAXUSDT",
+    "BNBUSDT", "AVAXUSDT",
     "DOGEUSDT", "UNIUSDT", "ADAUSDT", "DOTUSDT",
-]
+]  # XRPUSDT removed: quant found net -$36 across 4 trades (trail stop whipsaw)
 INTERVAL = "1h"                                   # Candle size: 1m/5m/15m/1h/4h/1d
 LOOKBACK = "730 day ago UTC"
 
 # 0.50 — ETHUSDT hold-out showed 77.3% precision at this level.
 BUY_THRESHOLD   = float(os.environ.get("BUY_THRESHOLD",   "0.50"))
-SELL_THRESHOLD  = float(os.environ.get("SELL_THRESHOLD",  "0.45"))  # exit long when prob drops below here
+SELL_THRESHOLD  = float(os.environ.get("SELL_THRESHOLD",  "0.38"))  # exit long when prob drops below here — matches bot-1-quant, lets winners run
 SHORT_THRESHOLD = float(os.environ.get("SHORT_THRESHOLD", "0.55"))  # raised from 0.50 — 90% precision at 0.55+ vs 50% at 0.50
-COVER_THRESHOLD = float(os.environ.get("COVER_THRESHOLD", "0.45"))  # exit short when prob drops below here
+COVER_THRESHOLD = float(os.environ.get("COVER_THRESHOLD", "0.38"))  # exit short when prob drops below here — matches bot-1-quant
 
 # Minimum walk-forward precision to allow new LONG entries (skip weak models)
 MIN_LONG_WF_PRECISION = float(os.environ.get("MIN_LONG_WF_PRECISION", "0.42"))
