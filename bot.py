@@ -574,9 +574,16 @@ class LiveTrader:
         return False
 
     def _place_close_order(self, fsym: str, order_type: str, close_side: str,
-                            units: float, trigger: float, tries: int = 3, delay: float = 0.5):
+                            units: float, trigger: float, tries: int = 5, delay: float = 1.0):
         """Place a closePosition SL/TP order, retrying on Binance's -4130 (stale
-        closePosition order still settling server-side after cancel)."""
+        closePosition order still settling server-side after cancel).
+
+        -4130 reflects Binance's matching-engine-internal "closePosition order in
+        this direction" flag, which can outlive both the REST order-list being
+        empty (confirmed by _cancel_open_orders) AND a short fixed retry window —
+        confirmed live 2026-07-03 where 3 attempts x 0.5s (1.5s total) was not
+        enough. Exponential backoff (1,2,4,8,8s = ~23s total) gives the engine
+        realistic time to settle without retrying forever."""
         params = self._sl_params(trigger) if order_type == "stop_market" else self._tp_params(trigger)
         last_err = None
         for attempt in range(tries):
@@ -585,7 +592,7 @@ class LiveTrader:
             except Exception as e:
                 last_err = e
                 if attempt < tries - 1:
-                    time.sleep(delay)
+                    time.sleep(min(delay * (2 ** attempt), 8.0))
         return None, last_err
 
     # ── Trail state persistence ───────────────────────────────────────────────
@@ -675,8 +682,23 @@ class LiveTrader:
             fallback_prec = float(self._exchange.price_to_precision(fsym, current_trail))
             restore_order, restore_err = self._place_close_order(fsym, "stop_market", close_side, units, fallback_prec)
             if restore_order is None:
+                # Both the new SL and the restore-to-prior-price attempt hit the same
+                # underlying block (Binance's closePosition-direction flag, not a price
+                # issue — confirmed live 2026-07-03), so retrying the restore again would
+                # likely just fail the same way. Do not leave a leveraged position naked
+                # for up to another hour: emergency-close at market, same as the
+                # entry-side failure path in execute().
                 print(f"[live] CRITICAL: {symbol} has NO STOP LOSS — restore also failed: {restore_err}")
-                send_telegram(f"CRITICAL: {symbol} live position has NO STOP LOSS attached — manual check needed. {restore_err}")
+                try:
+                    self._exchange.create_order(fsym, "market", close_side, units, params={"reduceOnly": True})
+                    print(f"[live] {symbol} emergency-closed after SL restore failure")
+                    send_telegram(f"WARNING: {symbol} trail SL restore failed twice ({restore_err}) — "
+                                  f"position emergency-closed to avoid running naked. Was not left unprotected.")
+                    self._clear_live_state(symbol)
+                except Exception as e2:
+                    print(f"[live] CRITICAL: emergency close also failed: {e2}")
+                    send_telegram(f"CRITICAL: {symbol} live position has NO STOP LOSS and emergency close FAILED "
+                                  f"— manual check needed NOW. {e2}")
             else:
                 print(f"[live] trail SL restore OK: kept prior SL ${fallback_prec:,.2f}")
             return None
@@ -1005,10 +1027,26 @@ def _run_live_bot():
                 atr   = float(df["atr"].iloc[-1])
                 upnl  = float(pos.get("unrealizedPnl", 0))
 
-                trail_msg = paper_trader._update_trail_stop(sym, price, atr)
+                # price/atr above are from the KuCoin feed (used for ML feature scoring —
+                # that's intentional, models are trained on it). But KuCoin and Binance can
+                # diverge significantly (confirmed live 2026-07-03: SOLUSDT showed $81 vs
+                # $145 within the same hour) — the same class of bug already fixed for entry
+                # sizing (execute()'s "New entry" branch) was never applied to the trail-stop
+                # update, meaning _update_trail_stop could compute a new stop level relative
+                # to a price the Binance position was nowhere near. Fetch the real Binance
+                # price here too and use it for both the trail calc and the log line.
+                try:
+                    _ticker = paper_trader._exchange.fetch_ticker(fsym)
+                    live_price = float(_ticker.get("last") or _ticker.get("bid") or 0) or price
+                except Exception:
+                    live_price = price
+                    print(f"[live] WARNING: Binance price fetch failed for {sym}, using KuCoin price for trail/log")
+                atr_live = atr * live_price / max(price, 1e-9)
+
+                trail_msg = paper_trader._update_trail_stop(sym, live_price, atr_live)
                 if trail_msg:
                     print(f"[live] {sym} {trail_msg}")
-                    send_telegram(f"*Trail Updated*\n{sym} @ ${price:,.4f}\n{trail_msg}")
+                    send_telegram(f"*Trail Updated*\n{sym} @ ${live_price:,.4f}\n{trail_msg}")
 
                 if side == "long":
                     if not config.ENABLE_LONGING:
@@ -1033,9 +1071,11 @@ def _run_live_bot():
                         prob = 0.5
                     signal = "COVER" if prob <= config.COVER_THRESHOLD else "HOLD"
 
-                action = paper_trader.execute(signal, price, atr, sym)
+                # live_price (Binance), not the KuCoin `price` used for ML scoring above —
+                # this is what actually matches the open position and any close/log display.
+                action = paper_trader.execute(signal, live_price, atr_live, sym)
                 print(
-                    f"[live] {sym} {side} ${price:,.4f} | ML: {prob:.1%} | "
+                    f"[live] {sym} {side} ${live_price:,.4f} | ML: {prob:.1%} | "
                     f"uPnL: ${upnl:+,.2f} | {signal} → {action}"
                 )
                 if action.startswith("ML-CLOSE"):

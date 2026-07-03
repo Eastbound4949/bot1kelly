@@ -13,7 +13,7 @@ Upgrades over v2:
 import os
 import pickle
 import warnings
-from datetime import datetime
+from datetime import datetime, timezone
 
 import time
 
@@ -596,7 +596,7 @@ def train_and_save(symbol: str | None = None, model_file: str | None = None) -> 
     payload = {
         "model":            calibrated,
         "feature_cols":     selected,
-        "trained_at":       datetime.utcnow().isoformat(),
+        "trained_at":       datetime.now(timezone.utc).isoformat(),
         "label_horizon":    LABEL_HORIZON,
         "label_threshold":  LABEL_THRESHOLD,
         "symbol":           sym,
@@ -707,7 +707,7 @@ def train_and_save_short(symbol: str | None = None, model_file: str | None = Non
     payload = {
         "model":              calibrated,
         "feature_cols":       selected,
-        "trained_at":         datetime.utcnow().isoformat(),
+        "trained_at":         datetime.now(timezone.utc).isoformat(),
         "label_horizon":      LABEL_HORIZON,
         "label_threshold":    LABEL_THRESHOLD,
         "symbol":             sym,
