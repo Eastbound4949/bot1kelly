@@ -504,6 +504,30 @@ class LiveTrader:
     def _open_positions(self) -> list:
         return [p for p in self._exchange.fetch_positions() if float(p.get("contracts", 0)) != 0]
 
+    def _fetch_realized_pnl(self, fsym: str, entry_price: float, side: str) -> float:
+        """Sum realizedPnl of the most recent reduceOnly fill(s) for fsym (Binance futures
+        trade records carry it in info.realizedPnl). Falls back to a price-direction estimate
+        if the exchange doesn't expose it, so a win/loss is never silently dropped."""
+        try:
+            trades = self._exchange.fetch_my_trades(fsym, limit=10)
+            total = 0.0
+            found = False
+            for t in reversed(trades):
+                info = t.get("info", {})
+                rpnl = info.get("realizedPnl")
+                if rpnl is None:
+                    continue
+                rpnl = float(rpnl)
+                if rpnl == 0.0:
+                    continue
+                total += rpnl
+                found = True
+            if found:
+                return total
+        except Exception as e:
+            print(f"[live] fetch_my_trades {fsym} failed: {e}")
+        return 0.0
+
     def _set_leverage(self, fsym: str, lev: int):
         if not self._is_bybit and not self._is_okx:
             # Binance defaults new symbols to ISOLATED, which gets margin-called
@@ -528,16 +552,18 @@ class LiveTrader:
             return {"triggerPrice": trigger, "reduceOnly": True}
         if self._is_okx:
             return {"stopPrice": trigger, "reduceOnly": True}
-        # Binance USDM rejects reduceOnly combined with closePosition (-1106)
-        return {"stopPrice": trigger, "closePosition": True}
+        # reduceOnly + qty (not closePosition) — closePosition is a per-direction
+        # singleton lock server-side and causes -4130 on cancel/replace (trail
+        # updates); reduceOnly+qty orders can be cancelled/replaced freely.
+        return {"stopPrice": trigger, "reduceOnly": True}
 
     def _tp_params(self, trigger: float) -> dict:
         if self._is_bybit:
             return {"triggerPrice": trigger, "reduceOnly": True}
         if self._is_okx:
             return {"stopPrice": trigger, "reduceOnly": True}
-        # Binance USDM rejects reduceOnly combined with closePosition (-1106)
-        return {"stopPrice": trigger, "closePosition": True}
+        # reduceOnly + qty (not closePosition) — see _sl_params for why.
+        return {"stopPrice": trigger, "reduceOnly": True}
 
     def _cancel_open_orders(self, fsym: str) -> bool:
         """Cancel every open order for fsym by explicit ID and poll until Binance
@@ -692,8 +718,22 @@ class LiveTrader:
                 try:
                     self._exchange.create_order(fsym, "market", close_side, units, params={"reduceOnly": True})
                     print(f"[live] {symbol} emergency-closed after SL restore failure")
+                    # This is a real closed trade with real PnL (not a same-tick abort) —
+                    # must count it in _entries/_wins/_losses and the trade log, same as
+                    # the exchange SL/TP-close detection path, or it silently disappears
+                    # from the WR stat and CSV history.
+                    pnl_usd = self._fetch_realized_pnl(fsym, entry_price, side)
+                    self._entries += 1
+                    if pnl_usd > 0:
+                        self._wins += 1
+                    elif pnl_usd < 0:
+                        self._losses += 1
+                    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    self.log_trade(now_str, symbol, "SL-FAIL", entry_price, 0.0,
+                                    f"EMERGENCY-CLOSE {side} (trail SL restore failed)", pnl_usd=pnl_usd)
                     send_telegram(f"WARNING: {symbol} trail SL restore failed twice ({restore_err}) — "
-                                  f"position emergency-closed to avoid running naked. Was not left unprotected.")
+                                  f"position emergency-closed to avoid running naked. Was not left unprotected. "
+                                  f"PnL: ${pnl_usd:+,.2f} | {self._fmt_stats()}")
                     self._clear_live_state(symbol)
                 except Exception as e2:
                     print(f"[live] CRITICAL: emergency close also failed: {e2}")
@@ -993,7 +1033,15 @@ def _run_live_bot():
                 entry_p = state.get("entry_price", 0)
                 sl_p    = state.get("trail_stop", 0)
                 tp_p    = state.get("tp_price", 0)
+                fsym    = _futures_symbol(sym)
+                pnl_usd = paper_trader._fetch_realized_pnl(fsym, entry_p, side)
                 paper_trader._entries += 1 if entry_p else 0
+                if pnl_usd > 0:
+                    paper_trader._wins += 1
+                elif pnl_usd < 0:
+                    paper_trader._losses += 1
+                # pnl_usd == 0 (exchange didn't expose realizedPnl and we couldn't infer
+                # a nonzero fill): don't guess — leave WR uncounted rather than wrong.
                 paper_trader._clear_live_state(sym)
                 dir_emoji = "📈" if side == "long" else "📉"
                 sl_str = f"SL≈${sl_p:,.4f}" if sl_p else "SL?"
@@ -1002,12 +1050,13 @@ def _run_live_bot():
                 close_msg = (
                     f"🔔 *Position Closed by Exchange*\n"
                     f"{dir_emoji} {sym} {side.upper()} — SL/TP hit\n"
-                    f"Entry: ${entry_p:,.4f} | {sl_str} | {tp_str}\n"
+                    f"Entry: ${entry_p:,.4f} | {sl_str} | {tp_str} | PnL: ${pnl_usd:+,.2f}\n"
                     f"Balance: ${balance:,.2f} | Portfolio: ${portfolio_val:,.2f}\n"
                     f"{paper_trader._fmt_stats()}"
                 )
                 send_telegram(close_msg)
-                paper_trader.log_trade(now_str, sym, "SL/TP", entry_p, 0.0, f"CLOSED by exchange ({side})")
+                paper_trader.log_trade(now_str, sym, "SL/TP", entry_p, 0.0,
+                                        f"CLOSED by exchange ({side})", pnl_usd=pnl_usd)
 
         # Phase 1: monitor open positions for ML-driven exits
         for pos in open_positions:
@@ -1080,12 +1129,14 @@ def _run_live_bot():
                 )
                 if action.startswith("ML-CLOSE"):
                     paper_trader._clear_live_state(sym)
-                    if upnl >= 0:
+                    if upnl > 0:
                         paper_trader._wins += 1
                         outcome_emoji = "✅ WIN"
-                    else:
+                    elif upnl < 0:
                         paper_trader._losses += 1
                         outcome_emoji = "❌ LOSS"
+                    else:
+                        outcome_emoji = "⏸ BREAKEVEN"
                     dir_emoji = "📈" if side == "long" else "📉"
                     close_telegram = (
                         f"{outcome_emoji} *ML-Exit*\n"
