@@ -1008,8 +1008,52 @@ def _scan_symbols() -> list[tuple]:
 paper_trader: PaperTrader | LiveTrader = LiveTrader() if config.LIVE_TRADING else PaperTrader()
 
 
+_HEARTBEAT_PATH = os.path.join(_BOT_DIR, "watchdog_heartbeat.txt")
+
+
+def _touch_heartbeat():
+    """Written at the START of every tick attempt (success or failure) so the
+    watchdog job can tell 'scheduler stopped invoking jobs' apart from 'this
+    tick errored but the scheduler is still alive' -- see _watchdog_check()."""
+    try:
+        with open(_HEARTBEAT_PATH, "w") as f:
+            f.write(str(datetime.now(timezone.utc).timestamp()))
+    except Exception:
+        pass  # heartbeat itself must never be able to break a tick
+
+
+def _watchdog_check():
+    """
+    2026-07-05: added after the bot silently stopped ticking for 1h+ following
+    a Binance IP rate-limit ban (418/-1003) -- the tick's own exception handler
+    caught and logged that error correctly, but no further scheduled ticks ran
+    afterward (root cause of the *hang itself* wasn't pinned down with
+    certainty), and there was no healthcheck to catch it since this is a
+    worker process, not a web service -- Railway showed "Online" the whole
+    time. This job runs on its own schedule and force-exits the process if a
+    real tick hasn't completed in too long, so Railway's ON_FAILURE restart
+    policy (see railway.json, added same day) recovers automatically instead
+    of requiring a manual restart.
+    """
+    try:
+        with open(_HEARTBEAT_PATH) as f:
+            last = float(f.read().strip())
+    except Exception:
+        return  # no heartbeat yet (first few minutes after deploy) -- nothing to check
+    age_min = (datetime.now(timezone.utc).timestamp() - last) / 60
+    interval_min = interval_map.get(config.INTERVAL, 60)
+    stale_after_min = interval_min * 2.5  # generous margin over the normal cadence
+    if age_min > stale_after_min:
+        msg = (f"[watchdog] CRITICAL: last tick was {age_min:.0f} min ago "
+               f"(expected every {interval_min} min) -- forcing restart")
+        print(msg)
+        send_telegram(f"⚠️ Kelly bot watchdog: {msg}")
+        os._exit(1)  # Railway's ON_FAILURE restart policy brings it back up fresh
+
+
 def _run_live_bot():
     """Live-mode tick: monitor open futures positions, then scan for entries."""
+    _touch_heartbeat()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"\n{'-'*55}")
     print(f"[live] Running at {now}")
@@ -1400,6 +1444,11 @@ def run_bot():
 
 # ─── Scheduler ────────────────────────────────────────────────────────────────
 
+interval_map = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "1d": 1440,
+}
+
 if __name__ == "__main__":
     print("=" * 55)
     mode_label = "LIVE FUTURES" if config.LIVE_TRADING else "paper"
@@ -1408,7 +1457,6 @@ if __name__ == "__main__":
     print(f" Interval: {config.INTERVAL}")
     if config.LIVE_TRADING:
         print(f" Exchange: {config.FUTURES_EXCHANGE} | Leverage: dynamic (max before liquidation, cap 40x)")
-        print(f" Max concurrent trades: {config.MAX_CONCURRENT_TRADES}")
     else:
         print(f" Balance:  ${config.PAPER_STARTING_BALANCE:,.0f} (paper)")
     print(f" BUY threshold: {config.BUY_THRESHOLD:.0%} | Risk/trade: {config.RISK_PER_TRADE:.0%}")
@@ -1422,12 +1470,13 @@ if __name__ == "__main__":
     run_bot()
 
     scheduler = BlockingScheduler()
-    interval_map = {
-        "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
-        "1h": 60, "2h": 120, "4h": 240, "6h": 360, "1d": 1440,
-    }
     minutes = interval_map.get(config.INTERVAL, 60)
     scheduler.add_job(run_bot, "interval", minutes=minutes)
+    if config.LIVE_TRADING:
+        # Watchdog: catches the tick-scheduler silently going stale (see
+        # _watchdog_check docstring, added 2026-07-05) -- runs independently
+        # of the main tick job so it keeps checking even if that job hangs.
+        scheduler.add_job(_watchdog_check, "interval", minutes=15)
 
     print(f"\n[bot] Scheduler running every {minutes} min. Ctrl+C to stop.\n")
     send_telegram(
