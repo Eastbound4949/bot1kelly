@@ -33,11 +33,12 @@ LOOKBACK = "730 day ago UTC"
 # 0.50 — ETHUSDT hold-out showed 77.3% precision at this level.
 BUY_THRESHOLD   = float(os.environ.get("BUY_THRESHOLD",   "0.50"))
 SELL_THRESHOLD  = float(os.environ.get("SELL_THRESHOLD",  "0.38"))  # exit long when prob drops below here — matches bot-1-quant, lets winners run
-SHORT_THRESHOLD = float(os.environ.get("SHORT_THRESHOLD", "0.55"))  # raised from 0.50 — 90% precision at 0.55+ vs 50% at 0.50
+SHORT_THRESHOLD = float(os.environ.get("SHORT_THRESHOLD", "0.50"))  # matches bot-1-quant (Railway env var already 0.50 live; code default was stale at 0.55)
 COVER_THRESHOLD = float(os.environ.get("COVER_THRESHOLD", "0.38"))  # exit short when prob drops below here — matches bot-1-quant
 
-# Minimum walk-forward precision to allow new LONG entries (skip weak models)
-MIN_LONG_WF_PRECISION = float(os.environ.get("MIN_LONG_WF_PRECISION", "0.42"))
+# Minimum walk-forward precision to allow new LONG entries — bot-1-quant has no equivalent gate at all.
+# Default 0 (disabled) to match; Railway env var already had this at 0 live, code default was stale at 0.42.
+MIN_LONG_WF_PRECISION = float(os.environ.get("MIN_LONG_WF_PRECISION", "0"))
 ENABLE_SHORTING = os.environ.get("ENABLE_SHORTING", "true").lower() == "true"
 ENABLE_LONGING  = os.environ.get("ENABLE_LONGING",  "true").lower() == "true"
 
@@ -84,7 +85,6 @@ RETRAIN_DAYS   = 7            # Retrain every N days
 LIVE_TRADING          = os.environ.get("LIVE_TRADING",          "false").lower() == "true"
 LEVERAGE              = int(os.environ.get("LEVERAGE",              "3"))
 MAX_LEVERAGE          = int(os.environ.get("MAX_LEVERAGE",          "10"))   # cap dynamic leverage (was 40 — too high for small accounts)
-MAX_CONCURRENT_TRADES = int(os.environ.get("MAX_CONCURRENT_TRADES", "2"))
 FUTURES_EXCHANGE      = os.environ.get("FUTURES_EXCHANGE",      "binanceusdm")
 MIN_FREE_BALANCE      = float(os.environ.get("MIN_FREE_BALANCE",    "15"))   # skip new entries if free USDT < this
 

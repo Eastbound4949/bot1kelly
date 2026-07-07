@@ -125,19 +125,26 @@ def _ohlcv_to_df(ohlcv: list, symbol: str) -> pd.DataFrame:
 
 
 def _fetch_full_ohlcv(exchange: ccxt.Exchange, symbol: str, timeframe: str, since_ms: int) -> pd.DataFrame:
-    """Paginate ccxt fetch_ohlcv until we have all candles since `since_ms`."""
+    """Paginate ccxt fetch_ohlcv until we have all candles since `since_ms`.
+
+    Loop on `since < now_ms`, not `len(batch) < limit` — KuCoin can return
+    short batches mid-history, not just at the end, causing silent early
+    termination (see feedback_ccxt_kucoin_pagination).
+    """
     ccxt_sym = _to_ccxt_symbol(exchange, symbol)
     all_ohlcv = []
     limit = 1000
     since = since_ms
-    while True:
+    now_ms = int(time.time() * 1000)
+    while since < now_ms:
         batch = exchange.fetch_ohlcv(ccxt_sym, timeframe, since=since, limit=limit)
         if not batch:
             break
         all_ohlcv.extend(batch)
-        if len(batch) < limit:
+        last_ts = batch[-1][0]
+        if last_ts <= since:
             break
-        since = batch[-1][0] + 1
+        since = last_ts + 1
         time.sleep(exchange.rateLimit / 1000)
     return _ohlcv_to_df(all_ohlcv, symbol)
 
